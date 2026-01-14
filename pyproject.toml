@@ -1,0 +1,18 @@
+[project]
+name = "dae-sensitivity-free-optimization"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "diffrax>=0.7.0",
+    "dotenv>=0.9.9",
+    "fmpy>=0.3.26",
+    "ipykernel>=7.1.0",
+    "jax[cuda12]>=0.8.1",
+    "matplotlib>=3.10.7",
+    "numpy>=2.4.1",
+    "ompython>=4.0.0",
+    "pandas>=2.3.3",
+    "pyyaml>=6.0.3",
+]

@@ -1,0 +1,321 @@
+\section{Introduction}
+
+Notations: The gradient of a scalar function $f$ with respect to the vector $x$ is denoted by $\nabla_x f$. The Jacobian of the vector-valued function $g$ with respect to the vector $x$ is denoted by $\partial_x g$.
+
+
+
+
+\section{Problem formulation}
+
+
+
+Consider the semi-explicit DAE
+\begin{align}
+\label{eq:01090930}
+\dot{{x}}(t) &= {f}({x}(t),{z}(t);{\theta}), \\
+\label{eq:01090931}
+0 &= {g}({x}(t),{z}(t);{\theta}),
+\end{align}
+with output
+\begin{equation}
+\label{eq:01090932}
+{y}(t) = {h}({x}(t),{z}(t)),
+\end{equation}
+where ${x}$ is that state vector, ${z}$ is the algebraic variable vector, ${\theta}$ is the vector of parameters and ${y}$ is the vector of outputs.
+Let $\bar\Phi(\theta)$ be the loss function given \begin{equation}
+\bar\Phi({\theta})
+=
+\sum_{i=1}^M \ell\big({y}(t_i;{\theta})\big),
+\end{equation}
+where  the loss function is defined in terms of the output vector sampled at time instants $t_1,\dots,t_M$, and where $l$ applies to individual output samples. Our objective objective is to solve the following optimization problem
+\begin{align}
+\label{eq:01091047}
+& \min_{\theta}  \bar\Phi({\theta}), \\
+\nonumber
+\textmd{subject to}: & \\
+\label{eq:01091048}
+& \dot{{x}}(t) = {f}({x}(t),{z}(t);{\theta}), \\
+\label{eq:01091049}
+ & {g}({x}(t),{z}(t);{\theta}) = 0,\\
+ \label{eq:01091050}
+ & y(t) = {h}({x}(t),{z}(t)).
+\end{align}
+
+
+When applying gradient-based methods the key object is the gradient of the loss function $\nabla_\theta \bar\Phi(\theta)$, whose evaluation requires the sensitivities of the state and algebraic variables sensitivities $S_{{x}}=\partial_{\theta} {x}$ and $S_{ z}=\partial_{\theta} {z}$, respectively. The dynamical equations for these sensitivities are given by 
+\begin{align}
+\dot S_{ x} &= \partial_x {f} S_{ x} + { \partial_z {f}} S_{ z} +  \partial_{\theta} {f}, \\
+0 &= \partial_x {g}S_{ x} + \partial_z {g} S_{ z} + \partial_{\theta}g,
+\end{align}
+and the gradient of the loss function is given by
+\begin{equation}
+\nabla_\theta \bar\Phi({\theta})^T
+=
+\sum_{i=1}^M
+\nabla_y l({y}(t_i))^\top
+\left(
+ \partial_{x}h S_{ x}(t_i) +\partial_{z} h S_{ z}(t_i)
+\right).
+\end{equation}
+
+The simplest form of an optimization algorithm to search for optimal parameter vector is the (first order) gradient-based algorithm 
+\begin{equation}
+{\theta}^{i+1} = {\theta}^i - \alpha \nabla_{ \theta} \bar\Phi({\theta}^i),
+\end{equation}
+or the variety of versions [xxx]. This continuous sensitivity-based gradient defines the \emph{reference
+optimization dynamics}. 
+
+
+\section{Motivation: Challenges with standard approaches in optimization problem with DAEs in the loop}
+\label{sec:ad_vs_residual_optimization}
+Automatic differentiation applied on top of DAE solvers is dominated by parameter-dimension blow-up, checkpointing overhead, differentiation through implicit solves, and poor accelerator utilization \cite{hindmarsh2005sundials,griewank2000revolve,chen2018neuralode}.
+By reformulating the problem as joint optimization over states, algebraic variables, and parameters, the proposed approach replaces solver-level blocking with batched residual evaluations and structured Krylov adjoint computations.
+
+
+Gradient-based optimization of DAE-constrained systems requires evaluating sensitivities of a loss function with respect to model parameters.
+A common baseline approach differentiates \emph{through} a numerical DAE solver using automatic differentiation (AD), either via forward (direct) sensitivities or via adjoint (reverse-mode) sensitivities. While mathematically correct, this solver-centric paradigm is often computationally expensive in practice, especially for large-scale or stiff DAEs. In a solver-centric workflow, the state and algebraic variable trajectory $(x(t),z(t))$ is first computed using a DAE integrator, and sensitivities are then obtained by differentiating the solver output.
+
+Two classical strategies are widely used: \textit{direct (forward) sensitivities}, which integrate augmented DAEs for $S_{ x}$ and $S_{ z}$, and \textit{adjoint (reverse) sensitivities}, which integrate an adjoint DAE backward in time using the forward trajectory. These approaches are implemented in mature solver libraries such as SUNDIALS (CVODES/IDAS) \cite{hindmarsh2005sundials,cvodes_adj,idas_adj} and in modern scientific ML frameworks \cite{scimlsensitivity}. Despite their generality, solver-centric sensitivity methods incur substantial computational overhead, particularly for DAEs. Forward sensitivities scale linearly with the number of parameters. For $n_\theta$ parameters, the augmented sensitivity system introduces $O(n_\theta)$ additional state variables. In stiff or implicit integrators, each time step requires Newton iterations and repeated Jacobian factorizations quickly becoming prohibitive. Adjoint methods avoid the parameter-dimension blow-up, but require access to the forward trajectory during the backward integration. In addition, even when the full forward solution $({x}(t),{z}(t))$ is available, one must still solve an adjoint differential--algebraic system backward in time. Trajectory storage or checkpointing addresses this data dependency, but does not eliminate the cost of integrating the adjoint system itself. For stiff DAEs, this backward integration typically involves implicit time stepping, Newton iterations, and linear solves comparable in cost to the original forward solve.
+
+DAEs amplify these costs relative to ODEs: (i) implicit algebraic constraints require consistent initialization, whose differentiation introduces additional implicit-function solves and nontrivial AD traces, (ii) implicit time-stepping (e.g., trapezoidal or BDF methods) involves Newton iterations at each step (differentiating through these iterations is expensive and control-flow heavy), and (iii) coupled Jacobian structures involving $g_z$ blocks increases the cost of both forward and adjoint linear algebra. Adaptive step sizes, event handling, and solver-internal branching lead to irregular control flow. Reverse-mode AD must record or reconstruct this control flow, which limits kernel fusion, batching, and SIMD/SIMT efficiency on GPUs. These limitations are well documented in differentiable ODE and DAE contexts, motivating specialized adjoint formulations rather than naive backpropagation through solver internals \cite{torchdiffeq,chen2018neuralode}.
+
+The approach pursued in this work reformulates the problem by treating the discretized state and algebraic variables as explicit optimization variables. This reformulation fundamentally alters the computational structure: (i) residual evaluations decompose across time steps and can be executed in batch, (ii) Jacobian-vector and vector-Jacobian products act directly on the residual functions, avoiding differentiation through nonlinear solver iterations, and (3) the linearized adjoint operator has a structured, time-recursive form that can be implemented via scan operations, enabling linear-time passes over the trajectory.
+
+By moving the trajectory variables into the optimization, the dominant computations become batched residual evaluations and structured linear algebra, both of which map naturally to GPU architectures. Parallelism is exposed across time steps, state dimensions, and even across multiple trajectories or scenarios. In contrast, solver-centric AD remains constrained by sequential time stepping, nonlinear solves, and irregular control flow, which fundamentally limits GPU efficiency. For DAEs, solver-centric sensitivity computation must repeatedly resolve algebraic constraints, consistent initialization, and stiff implicit solves. In the residual-based formulation, these constraints are explicit and differentiable objects. In the following sections, we first introduce an equivalent formulation of the optimization problem (\ref{eq:01091047}) that will serve a starting point for the development of two algorithms that avoid solving the sensitivity differential equations. Next, we introduce the algorithms and show that they can be track arbitrary close the gradient $\nabla_{ \theta} \bar\Phi({\theta}^i)$ of the original formulation.
+
+
+\section{Sequential to parallel evaluations}
+
+In this section we demonstrate how we can replace the sequential evaluations required for computing sensitivities with a re-formulation of the problem that enable batch computations for gradient evaluations. 
+
+\subsection{Equivalent problem formulation}
+First we reformulate the original optimization problem into an equivalent form. Let ${w}$ denote the combined vector of state and algebraic variables. Then a solution of the DAE evaluated at the vector parameter $\theta$ is denoted by $\hat{w}(\theta)$. Define the \emph{ideal residual} function
+\begin{equation}
+\tilde r(w,\theta) := w - \hat w(\theta).
+\end{equation}
+and consider the equality-constrained problem
+\begin{equation}
+\min_{\theta,w} \ \Phi(w)
+\quad \text{s.t.} \quad \tilde r(w,\theta)=0,
+\end{equation}
+where $\Phi(w)$ is the sampled loss expressed as a function of the trajectory. The solution of this problem is identical the solution of the original optimization problem formulation defined in (\ref{eq:01091047}). The reformulation of the problem introduced a new set of optimization variables $w$ which, by construction are the solution of the DAE when the residuals are zero. We further transform the problem by defining the penalty objective
+\begin{equation}
+\tilde F(w,\theta)
+=
+\Phi(w) + \frac{\mu}{2}\|\tilde r(w,\theta)\|^2,
+\end{equation}
+having to solve now an unconstrained optimization problem. Our goal is to derive a gradient-based optimization algorithm that when run is identical to a first order optimization algorithm applied to the original formulation. In \cite{JMLR:v24:22-1002} we showed such am algorithm applied to ODE. The algorithm can be verbatim applied to the DAE case by replacing the state vector with the augmented vector $w$, and is based on two ideas: (i) reset the vector $w$ at each iteration, and use a block coordinate descent to update the vector $w$ and the $\theta$. 
+By construction, we have that $\bar\Phi(\theta) = \Phi(\hat w(\theta))$. Differentiating the residual function $\tilde r$ we get $\frac{\partial \tilde r}{\partial w} = I$ and $\frac{\partial \tilde r}{\partial \theta} = -\frac{\partial \hat w}{\partial \theta}$.
+At each algorithm iteration, we first reset the state, i.e.,  $w^k = \hat w(\theta^k)$, and then perform a single inner gradient step
+on $\Phi$:
+\begin{equation}
+w^{k,+} = w^k - \alpha_w \nabla_w \Phi(w^k).
+\end{equation}
+Thus,
+\begin{equation}
+\tilde r(w^{k,+},\theta^k)
+=
+- \alpha_w \nabla_w \Phi(w^k).
+\end{equation}
+The gradient of $\tilde F(w,\theta)$ with respect to $\theta$ is
+\begin{equation}
+\nabla_\theta \tilde F(w,\theta)
+=
+-\mu \hat w_\theta(\theta)^\top \tilde r(w,\theta).
+\end{equation}
+and when it is evaluated at $(w^{k,+},\theta^k)$, it gives the  identity
+\begin{equation}
+\nabla_\theta \tilde F(w^{k,+},\theta^k)
+=
+\mu \alpha_w \nabla_\theta \bar\Phi(\theta^k).
+\end{equation}
+Thus, with the ideal residual and a reset, the penalty-based mechanism exactly
+recovers the true continuous sensitivity gradient up to a scalar factor.
+We summarize computational steps in Algorithm \ref{alg:reset_penalty_ideal_residual}.
+
+\begin{algorithm}[t]
+\caption{Reset-and-Penalty Gradient via Ideal Residual (DAE case)}
+\label{alg:reset_penalty_ideal_residual}
+\begin{algorithmic}[1]
+\Require Initial parameter $\theta^{0}$, penalty weight $\mu>0$, stepsizes $\alpha_w>0$, $\alpha_\theta>0$, number of iterations $K$
+\Require DAE solution map $\hat w(\theta)$ (returns the full stacked state+algebraic trajectory)
+\Require Loss $\Phi(w)$ and its trajectory gradient $\nabla_w \Phi(w)$
+% \State $\kappa \gets \mu\,\alpha_w$ \Comment{scalar relating penalty-gradient to true sensitivity}
+\For{$k = 0,1,\dots,K-1$}
+    \State \textbf{Reset:} $w^{k} \gets \hat w(\theta^{k})$
+    \State \textbf{Inner step on $\Phi$:} $w^{k,+} \gets w^{k} - \alpha_w \nabla_w \Phi(w^{k})$
+    \State \textbf{Ideal residual:} $\tilde r^{k} \gets \tilde r(w^{k,+},\theta^{k}) = w^{k,+} - \hat w(\theta^{k})$
+    \Comment{so $\tilde r^{k} = -\alpha_w \nabla_w \Phi(w^{k})$}
+    \State \textbf{Penalty gradient:} $g_\theta^{k} \gets \nabla_\theta \tilde F(w^{k,+},\theta^{k})
+    = -\mu\,\hat w_\theta(\theta^{k})^\top \tilde r^{k}$
+    \State \textbf{Parameter update:} $\theta^{k+1} \gets \theta^{k} - \alpha_\theta\, g_\theta^{k}$
+    \Comment{By imposing $\alpha_w \mu = 1$, this step is identical to the original formulation}
+\EndFor
+\State \Return $\theta^{K}$
+\end{algorithmic}
+\end{algorithm}
+
+ \subsection{DAE Discrete Approximation and Induced Gradient Structural Mismatch}
+
+Solving this problem directly, results in facing the same challenges as in the original problem formulation: we have the compute the sensitivity of $\hat{w}$ with respect to the vector of parameters. As in \cite{JMLR:v24:22-1002}, to remove this challenge, we redefine the residual function by approximating the DAE with an approximate discrete representation. For example, under a trapezoidal discretization scheme we have the residual $R_h(w,\theta)=0$, with components
+\begin{align}
+R^f_k &=
+x_{k+1}-x_k-\frac{h}{2}\big(f(x_k,z_k;\theta)+f(x_{k+1},z_{k+1};\theta)\big), \\
+R^g_k &= g(x_k,z_k;\theta).
+\end{align}
+For a better approximation, we can use higher order schemes, i.e.,  Hermite-Simpson \cite{MorenoMartin2024Collocation}, at an increased computational cost. Denoting by $w_h(\theta)$ the exact solution of $R_h(w,\theta)=0$, a reset step computes $w^k \approx w_h(\theta^k)$ so that
+$R_h(w^k,\theta^k)\approx 0$. To quantify impact if the residual function change to the gradient of the loss function with respect to the vector of parameter, we first define the Jacobians $A_h := \frac{\partial R_h}{\partial w}(w_h,\theta)$ and $R_{\theta,h} := \frac{\partial R_h}{\partial \theta}(w_h,\theta)$. Unlike the ideal residual, $A_h \neq I$, and  after a single inner gradient step
+\begin{equation}
+\Delta w := w^{k,+}-w^k = -\alpha_w \nabla_w \Phi(w^k),
+\end{equation}
+a first-order expansion yields
+\begin{equation}
+R_h(w^{k,+},\theta^k)
+=
+-\alpha_w A_h \nabla_w \Phi(w^k) + O(\alpha_w^2).
+\end{equation}
+Substituting into the penalty gradient gives
+\begin{equation}
+\nabla_\theta F_\mu(w^{k,+},\theta^k)
+\approx
+\Phi_\theta(w^k,\theta^k)
+-
+\mu \alpha_w R_{\theta,h}^\top A_h \nabla_w \Phi(w^k),
+\end{equation}
+revealing an operator mismatch relative to the ideal case. This shows that, while both the two residual function $\tilde{r}$ and $R_h$ are zero at the optimal solution, the structure of the gradient of the loss function under the discrete approximation of the DAE no longer follow original form. 
+Let $G(\theta)=\nabla_\theta \bar\Phi(\theta)$ denote the true continuous sensitivity gradient, and let $G_h(\theta)$ be the exact reduced gradient induced by the trapezoidal discretization.
+Then the gradient error at iteration $k$ admits the decomposition
+\[
+\|G_\bullet^k - G(\theta^k)\|
+\;\le\;
+\underbrace{\|G_\bullet^k - G_h(\theta^k)\|}_{\text{algorithmic error}}
+\;+\;
+\underbrace{\|G_h(\theta^k)-G(\theta^k)\|}_{\text{time discretization error}},
+\]
+where $\bullet$ stands for the algorithmic approach.
+The second term is intrinsic to the discretization and depends on the discretization scheme. For the trapezoidal scheme, we have that 
+\[
+\|G_h(\theta)-G(\theta)\| = \mathcal{O}(h^2)
+\]
+under standard regularity assumptions. The $\mathcal{O}(h^2)$ error bound assumes that $w$ is the ``perfect'' solution of the continuous DAE. However, all solutions are generated using a DAE solver that employs some time discretization scheme. The time discretization error can be completely eliminated if the residual definition uses the same discretization scheme that the DAE solver.
+
+In the next sections, we introduce two algorithms that preserves the parallel implementation feature, and quantifies the impact of the algorithm approach.
+
+\section{Discrete Adjoint Gradient Approach}
+
+\begin{algorithm}[htp!]
+\caption{Snapshot Discrete Adjoint Gradient (SDAG) Method}
+\label{alg:sdadg}
+\begin{algorithmic}[1]
+\Require Initial parameter $\theta^{0}$, step size $\alpha>0$, tolerance $\varepsilon_{\text{adj}}$
+\State $k \leftarrow 0$
+\While{not converged}
+    \State \textbf{Reset / Forward solve:}
+    \State \quad Compute $w^{k} \approx w_h(\theta^{k})$ such that
+    \[
+        R_h(w^{k},\theta^{k}) \approx 0
+    \]
+    \State \textbf{Adjoint (KKT) solve:}
+    \State \quad Form the linear operator
+    \[
+        A_k := R_{w,h}(w^{k},\theta^{k})
+    \]
+    \State \quad Approximately solve the adjoint system
+    \[
+        A_k^\top \lambda^{k} = \nabla_w \Phi(w^{k},\theta^{k})^\top
+    \]
+    using a matrix-free Krylov method until
+    \[
+        \|\nabla_w \Phi(w^{k},\theta^{k})^\top - A_k^\top \lambda^{k}\| \le \varepsilon_{\text{adj}}
+    \]
+    \State \textbf{Gradient evaluation:}
+    \State \quad Compute the reduced gradient
+    \[
+        g^{k} = \Phi_\theta(w^{k},\theta^{k})
+        - R_{\theta,h}(w^{k},\theta^{k})^\top \lambda^{k}
+    \]
+    \State \textbf{Parameter update:}
+    \State \quad $\theta^{k+1} = \theta^{k} - \alpha\, g^{k}$
+    \State $k \leftarrow k+1$
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+
+
+The residual function $R_h(w_h,\theta)$ is zero at all vector $w_k$ that satisfy the discrete approximation of the DAE. Any change of $\theta$ will induce a change in $w_h$, and thus we can consider $w_h$ as a function of $\theta$. Differentiating the discrete constraint
+$R_h(w_h(\theta),\theta)=0$ results in $A_h \frac{\partial w_h}{\partial \theta} + \frac{\partial R_h}{\partial \theta} = 0$, or equivalently $\frac{\partial w_h}{\partial \theta} = -A_h^{-1} \frac{\partial R_h}{\partial \theta}$. The exact reduced gradient of the trapezoidal problem is
+\begin{equation}
+\nabla_\theta \bar\Phi_h
+=
+\frac{\partial \Phi}{\partial \theta}
+-
+\frac{\partial \Phi}{\partial w} A_h^{-1} \frac{\partial R_h}{\partial \theta}.
+\end{equation}
+Introducing the discrete adjoint $\lambda$ defined by
+\begin{equation}
+A_h^\top \lambda = \frac{\partial \Phi}{\partial w}^\top,
+\end{equation}
+the gradient  can be written as
+\begin{equation}
+\nabla_\theta \bar\Phi_h
+=
+\frac{\partial \Phi}{\partial \theta}
+-
+\frac{\partial R_h}{\partial \theta}^\top \lambda.
+\end{equation}
+
+Solving for $\lambda$ is equivalent to computing the Lagrange multiplier
+associated with the trapezoidal DAE constraints and coincides with the discrete adjoint used in
+sensitivity analysis. The Lagrange multiplier corresponds to the constrained optimization problem 
+\[
+\min_{w,\theta}\ \Phi(w,\theta)
+\quad \text{s.t.}\quad
+R_h(w,\theta)=0,
+\]
+with corresponding discrete Lagrangian
+\[
+\mathcal{L}_h(w,\theta,\lambda)
+=
+\Phi(w,\theta)
++
+\lambda^\top R_h(w,\theta).
+\]
+
+Stationarity with respect to $w$ yields the discrete adjoint (KKT) condition
+\[
+A_h^\top \lambda = g,
+\qquad
+A_h := R_{w,h}(w,\theta), \quad
+g := \nabla_w \Phi(w,\theta)^\top.
+\]
+
+Instead of forming $A_h^{-1}$ or $w_{h,\theta}$, we compute an approximate
+adjoint $\lambda$ by solving
+\begin{equation}
+A_h^\top \lambda \approx g,
+\qquad
+g := \frac{\partial \Phi}{\partial w}(w^k,\theta^k)^\top,
+\end{equation}
+using a small number of Krylov iterations.
+
+The matrix $A_h$ is typically large, sparse, and structured (block-banded in time).
+Forming $A_h^{-T}$ explicitly is infeasible for large-scale problems.
+However, both matrix--vector products
+\[
+v \mapsto A_h v,
+\qquad
+u \mapsto A_h^\top u
+\]
+can be computed efficiently via automatic differentiation or by differentiating the residual evaluation code. Krylov subspace methods (e.g., GMRES, BiCGSTAB, MINRES) are therefore well suited for approximating $\lambda$ using only matrix--vector products with $A_h^\top$.
+
+If the Krylov residual satisfies
+\begin{equation}
+\|g - A_h^\top \lambda\| \le \varepsilon,
+\end{equation}
+then
+\begin{equation}
+\|\tilde G_h(\theta^k)-\nabla_\theta \bar\Phi_h(\theta^k)\|
+\le
+\|R_{\theta,h}\| \|A_h^{-T}\| \varepsilon,
+\end{equation}
+showing the the error can be made arbitrary small by taking sufficient Krylov iterations.
