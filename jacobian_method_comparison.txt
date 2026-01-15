@@ -1,0 +1,174 @@
+================================================================================
+JACOBIAN METHOD COMPARISON
+================================================================================
+
+Methods compared:
+1. Original: Autodiff on residual function directly
+2. Analytical: Construct from f and g Jacobians with exact identity
+3. Full: Reference full Jacobian (ground truth)
+
+================================================================================
+
+DIAGONAL BLOCKS (J_curr[k] = dr_{k+1}/dy_{k+1})
+--------------------------------------------------------------------------------
+
+Block J_curr[0] (row 0, col 0):
+  Max |Original - Reference|:   0.000000e+00
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  1.192093e-08
+  Location of max diff (Original): row 0, col 0
+  Location of max diff (Analytical): row 0, col 0
+  *** Original max diff is on DIAGONAL of differential states
+  *** Analytical max diff is on DIAGONAL of differential states
+
+Block J_curr[1] (row 1, col 1):
+  Max |Original - Reference|:   0.000000e+00
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  1.192093e-08
+  Location of max diff (Original): row 0, col 0
+  Location of max diff (Analytical): row 0, col 0
+  *** Original max diff is on DIAGONAL of differential states
+  *** Analytical max diff is on DIAGONAL of differential states
+
+Block J_curr[2] (row 2, col 2):
+  Max |Original - Reference|:   2.980232e-08
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  1.788139e-08
+  Location of max diff (Original): row 0, col 0
+  Location of max diff (Analytical): row 0, col 0
+  *** Original max diff is on DIAGONAL of differential states
+  *** Analytical max diff is on DIAGONAL of differential states
+
+Block J_curr[3] (row 3, col 3):
+  Max |Original - Reference|:   0.000000e+00
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  1.192093e-08
+  Location of max diff (Original): row 0, col 0
+  Location of max diff (Analytical): row 0, col 0
+  *** Original max diff is on DIAGONAL of differential states
+  *** Analytical max diff is on DIAGONAL of differential states
+
+Block J_curr[4] (row 4, col 4):
+  Max |Original - Reference|:   0.000000e+00
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  1.192093e-08
+  Location of max diff (Original): row 0, col 0
+  Location of max diff (Analytical): row 0, col 0
+  *** Original max diff is on DIAGONAL of differential states
+  *** Analytical max diff is on DIAGONAL of differential states
+
+Block J_curr[5] (row 5, col 5):
+  Max |Original - Reference|:   5.960464e-08
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  4.768372e-08
+  Location of max diff (Original): row 0, col 0
+  Location of max diff (Analytical): row 0, col 0
+  *** Original max diff is on DIAGONAL of differential states
+  *** Analytical max diff is on DIAGONAL of differential states
+
+Block J_curr[6] (row 6, col 6):
+  Max |Original - Reference|:   5.960464e-08
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  4.768372e-08
+  Location of max diff (Original): row 0, col 0
+  Location of max diff (Analytical): row 0, col 0
+  *** Original max diff is on DIAGONAL of differential states
+  *** Analytical max diff is on DIAGONAL of differential states
+
+Block J_curr[7] (row 7, col 7):
+  Max |Original - Reference|:   8.940697e-08
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  1.013279e-07
+  Location of max diff (Original): row 0, col 0
+  Location of max diff (Analytical): row 0, col 0
+  *** Original max diff is on DIAGONAL of differential states
+  *** Analytical max diff is on DIAGONAL of differential states
+
+Block J_curr[8] (row 8, col 8):
+  Max |Original - Reference|:   5.960464e-08
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  4.768372e-08
+  Location of max diff (Original): row 0, col 0
+  Location of max diff (Analytical): row 0, col 0
+  *** Original max diff is on DIAGONAL of differential states
+  *** Analytical max diff is on DIAGONAL of differential states
+
+
+SUB-DIAGONAL BLOCKS (J_prev[k] = dr_{k+1}/dy_k)
+--------------------------------------------------------------------------------
+
+Block J_prev[1] (row 1, col 0):
+  Max |Original - Reference|:   0.000000e+00
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  1.192093e-08
+
+Block J_prev[2] (row 2, col 1):
+  Max |Original - Reference|:   2.980232e-08
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  1.788139e-08
+
+Block J_prev[3] (row 3, col 2):
+  Max |Original - Reference|:   0.000000e+00
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  1.192093e-08
+
+Block J_prev[4] (row 4, col 3):
+  Max |Original - Reference|:   0.000000e+00
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  1.192093e-08
+
+Block J_prev[5] (row 5, col 4):
+  Max |Original - Reference|:   5.960464e-08
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  4.768372e-08
+
+Block J_prev[6] (row 6, col 5):
+  Max |Original - Reference|:   5.960464e-08
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  4.768372e-08
+
+Block J_prev[7] (row 7, col 6):
+  Max |Original - Reference|:   8.940697e-08
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  1.013279e-07
+
+Block J_prev[8] (row 8, col 7):
+  Max |Original - Reference|:   5.960464e-08
+  Max |Analytical - Reference|: 1.192093e-08
+  Max |Original - Analytical|:  4.768372e-08
+
+
+================================================================================
+SUMMARY STATISTICS
+================================================================================
+
+Overall maximum differences:
+  Original vs Reference:   8.940697e-08
+  Analytical vs Reference: 1.192093e-08
+  Original vs Analytical:  1.013279e-07
+
+WINNER: Analytical method
+  Improvement: 7.50x more accurate than Original
+
+Performance:
+  Original time:   0.4184 seconds
+  Analytical time: 0.2480 seconds
+  Reference time:  2.0174 seconds
+  Original speedup vs Reference:   4.82x
+  Analytical speedup vs Reference: 8.14x
+
+================================================================================
+CONCLUSIONS
+================================================================================
+
+The Analytical method (constructing from f and g Jacobians) provides
+more accurate results than the Original method (autodiff on residual).
+
+This is because:
+1. Identity matrices are constructed exactly (no autodiff roundoff)
+2. The residual structure is used analytically
+3. Only f and g need to be differentiated
+
+All methods are sufficiently accurate for practical optimization:
+- Maximum error is 8.94e-08
+- This is well below typical optimization tolerances (1e-6 to 1e-4)

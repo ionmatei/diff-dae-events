@@ -1,0 +1,25 @@
+Using the Jacobian blocks computed in "src/dae_jacobian.py", I want an efficient algorithm that solve a linear system with a particular structure.
+
+Let y_k = (x_k,z_k), and let Y=(y1, y2, ..., yN) with know initial conditions y0.
+Denote rk(y_{k-1},y_k, params) = r_trapezoidal(y_{k_1},y_k,params).
+We have the following Jacobian blocks that are computed in "src/dae_jacobian.py" by a function that returns a list of these Jacobians
+dr_k/dy_{k_1} (prev) and dr_k/dy_k (current)
+
+I have the following system of linear equations:
+dr_1/dy_{1}^T *lamb_1 + dr2/dy_{1}^T*lamb_2 = b_1
+dr_2/dy_{2}^T *lamb_2 + dr2/dy_{2}^T*lamb_3 = b_2
+
+dr_{N-1}/dy_{N-1}^T *lamb_{N-1} + drN/dy_{N_1}^T*lamb_N = b_{N-1}
+dr_N/dy_N*lamb_N = b_N
+
+where lamb_i are the unknown vectors.
+
+I need a very effcient algorithm that solves this system of equations taking into account the block structure of the syste of equations. The implementation should c
+consider Jax features and compilations related efficiencies (e.g., JIT, scan or what ever makes sense)
+
+Create a new files where such an algorithm will be implemented.
+
+
+
+
+
