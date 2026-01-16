@@ -1,26 +1,28 @@
 """
-Example demonstrating the DAE optimizer for parameter identification.
+Example demonstrating the DEER-based DAE optimizer using BwdEulerDEER.
+
+This example uses the DAEOptimizerDEER which:
+1. Uses BwdEulerDEER solver with implicit DAE form F(dy/dt, y, t, p) = 0
+2. Computes gradients using JAX automatic differentiation
+3. Combines f and g equations into a single implicit residual
 
 This example shows how to:
 1. Generate a reference trajectory with known (true) parameters
-2. Select which parameters to optimize (e.g., only capacitors)
-3. Perturb ONLY the selected parameters for initial guess (keep others at true values)
-4. Use the optimizer to recover the true parameters for selected parameters only
+2. Select which parameters to optimize
+3. Perturb ONLY the selected parameters for initial guess
+4. Use the DEER optimizer to recover the true parameters
 5. Validate that fixed parameters remain unchanged
-
-Supported discretization methods:
-- backward_euler: First-order implicit (A-stable, L-stable)
-- trapezoidal: Second-order implicit (A-stable) - default
-- bdf2 through bdf6: Higher-order BDF methods
 """
+
+# Add src to path for deer module imports
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 # Load config and set JAX platform BEFORE importing JAX modules
 import os
 import argparse
 import yaml
-
-# Valid discretization methods
-VALID_METHODS = ['backward_euler', 'trapezoidal', 'bdf2', 'bdf3', 'bdf4', 'bdf5', 'bdf6']
 
 
 def load_config(config_path: str) -> dict:
@@ -33,65 +35,39 @@ def setup_jax_device(config: dict):
     """Set JAX platform from config. Must be called before importing JAX modules."""
     device = config.get('optimizer', {}).get('device', 'cpu')
     os.environ['JAX_PLATFORM_NAME'] = device
-    
-    # Configure GPU memory preallocation if specified
-    if device == 'gpu':
-        gpu_mem_fraction = config.get('optimizer', {}).get('gpu_memory_fraction')
-        if gpu_mem_fraction is not None:
-             os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = str(gpu_mem_fraction)
-             print(f"GPU memory fraction set to: {gpu_mem_fraction}")
-             
     return device
 
 
 # Parse args and configure JAX before other imports
 def _init():
-    parser = argparse.ArgumentParser(description="DAE Parameter Identification")
+    parser = argparse.ArgumentParser(description="DEER-based DAE Parameter Identification")
     parser.add_argument(
         '--config', '-c',
         type=str,
         default='config/config_cauer.yaml',
         help='Path to configuration YAML file'
     )
-    parser.add_argument(
-        '--method', '-m',
-        type=str,
-        default=None,
-        choices=VALID_METHODS,
-        help=f'Time discretization method. Choices: {VALID_METHODS}. Default: trapezoidal (or from config)'
-    )
     args, _ = parser.parse_known_args()
     config = load_config(args.config)
     device = setup_jax_device(config)
-    method = args.method  # May be None if not specified
-    return config, device, method
+    return config, device
 
 
-_config, _device, _method = _init()
+_config, _device = _init()
 
 # Now import JAX-dependent modules
 import numpy as np
 import json
-from src.discrete_adjoint.dae_solver import DAESolver
-from src.discrete_adjoint.dae_jacobian import DAEOptimizer
+from discrete_adjoint.dae_solver import DAESolver
+from deer_optimization.dae_optimizer_deer import DAEOptimizerDEER
 
 
-def example_parameter_identification(config: dict, method: str = None):
-    """
-    Example: Identify DAE parameters from output trajectory.
-
-    Args:
-        config: Configuration dictionary
-        method: Time discretization method. If None, uses 'trapezoidal' or value from config.
-    """
-    # Determine method: CLI arg > config > default
-    if method is None:
-        method = config.get('optimizer', {}).get('method', 'trapezoidal')
+def example_parameter_identification_deer(config: dict):
+    """Example: Identify DAE parameters using DEER-based optimizer."""
 
     print("=" * 80)
-    print("DAE Parameter Identification Example")
+    print("DEER-based DAE Parameter Identification Example")
     print("=" * 80)
-    print(f"Discretization method: {method}")
 
     # Extract config sections
     solver_cfg = config['dae_solver']
@@ -121,7 +97,7 @@ def example_parameter_identification(config: dict, method: str = None):
     for name, val in zip(param_names, p_true):
         print(f"  {name:20s} = {val:.6f}")
 
-    # Solve DAE with true parameters
+    # Solve DAE with true parameters (using IDA for reference)
     solver_true = DAESolver(dae_data)
     t_span = (solver_cfg['start_time'], solver_cfg['stop_time'])
     ncp = solver_cfg['ncp']
@@ -180,16 +156,23 @@ def example_parameter_identification(config: dict, method: str = None):
 
     # Create modified DAE data with initial parameters
     dae_data_init = dae_data.copy()
+    dae_data_init['parameters'] = [p.copy() for p in dae_data['parameters']]
     for i, p_dict in enumerate(dae_data_init['parameters']):
         p_dict['value'] = float(p_init[i])
 
-    # Step 4: Optimize parameters
+    # Step 4: Optimize parameters using DEER-based optimizer
     print("\n" + "=" * 80)
-    print("Step 4: Optimize Parameters")
+    print("Step 4: Optimize Parameters (DEER)")
     print("=" * 80)
 
-    # Create optimizer with selected parameters and method
-    optimizer = DAEOptimizer(dae_data_init, optimize_params=opt_params, method=method)
+    # Create DEER optimizer with selected parameters
+    optimizer = DAEOptimizerDEER(
+        dae_data_init,
+        optimize_params=opt_params,
+        deer_max_iter=200,
+        deer_atol=1e-8,
+        deer_rtol=1e-6,
+    )
 
     # Run optimization
     # Only pass initial values for parameters being optimized
@@ -238,8 +221,9 @@ def example_parameter_identification(config: dict, method: str = None):
     print("Step 6: Validate Optimized Parameters")
     print("=" * 80)
 
-    # Solve DAE with optimized parameters
+    # Solve DAE with optimized parameters (using IDA for validation)
     dae_data_opt = dae_data.copy()
+    dae_data_opt['parameters'] = [p.copy() for p in dae_data['parameters']]
     for i, p_dict in enumerate(dae_data_opt['parameters']):
         p_dict['value'] = float(p_opt_all[i])
 
@@ -282,7 +266,7 @@ def example_parameter_identification(config: dict, method: str = None):
             ax.plot(t_ref, y_opt[i, :], 'r--', linewidth=2, label=f'Optimized (output {i})')
         ax.set_xlabel('Time')
         ax.set_ylabel('Output')
-        ax.set_title('Trajectory Comparison: True vs Optimized')
+        ax.set_title('Trajectory Comparison: True vs Optimized (DEER)')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -293,7 +277,7 @@ def example_parameter_identification(config: dict, method: str = None):
             ax.semilogy(t_ref, error, linewidth=2, label=f'Output {i}')
         ax.set_xlabel('Time')
         ax.set_ylabel('Absolute Error')
-        ax.set_title('Trajectory Errors')
+        ax.set_title('Trajectory Errors (DEER)')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -313,7 +297,6 @@ def example_parameter_identification(config: dict, method: str = None):
 if __name__ == "__main__":
     # Config already loaded at module init (for JAX device setup)
     print(f"\nUsing device: {_device}")
-    print(f"Method: {_method if _method else 'from config or default (trapezoidal)'}")
     print("\n")
-    print("RUNNING FULL PARAMETER IDENTIFICATION EXAMPLE")
-    example_parameter_identification(_config, method=_method)
+    print("RUNNING DEER-BASED PARAMETER IDENTIFICATION EXAMPLE")
+    example_parameter_identification_deer(_config)

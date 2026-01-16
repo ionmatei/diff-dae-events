@@ -21,6 +21,7 @@ import re
 import time
 from typing import Dict, List, Tuple, Optional, Any, Callable
 from functools import partial
+from jax import lax
 
 # Enable float64 for better precision
 jax.config.update("jax_enable_x64", True)
@@ -349,7 +350,8 @@ class DAEOptimizerJax:
         self._simulate_scan = simulate_scan
 
         # JIT-compile the simulation
-        self._simulate_jit = jit(simulate_scan)
+        # self._simulate_jit = jit(simulate_scan)
+        self._simulate_jit = jit(lambda *args, **kwargs: lax.stop_gradient(simulate_scan)(*args, **kwargs))
 
         # Build the combined optimization step (Steps 2-7 from original)
         self._build_gradient_computation()
@@ -537,7 +539,9 @@ class DAEOptimizerJax:
             return p_opt_new, loss, grad_p_opt, y_traj
 
         self._combined_gradient_step = combined_gradient_step
-        self._combined_gradient_step_jit = jit(combined_gradient_step)
+        # self._combined_gradient_step_jit = jit(combined_gradient_step)
+        self._combined_gradient_step_jit = jit(lambda *args, **kwargs: lax.stop_gradient(self._combined_gradient_step(*args, **kwargs)))        
+        
 
     def optimization_step(
         self,

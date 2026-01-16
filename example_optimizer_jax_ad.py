@@ -52,8 +52,8 @@ _config, _device = _init()
 # Now import JAX-dependent modules
 import numpy as np
 import json
-from src.dae_solver import DAESolver
-from src.dae_optimizer_jax_ad import DAEOptimizerJaxAD
+from src.discrete_adjoint.dae_solver import DAESolver
+from src.discrete_adjoint.dae_optimizer_jax_ad import DAEOptimizerJaxAD
 
 
 def example_parameter_identification_jax_ad(config: dict):

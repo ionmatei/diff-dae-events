@@ -1,26 +1,29 @@
 """
-Example demonstrating the DAE optimizer for parameter identification.
+Example demonstrating the DEER-based DAE optimizer with different time discretization methods.
+
+This example uses the DEER-methods optimizer from dae_optimizer_deer_methods.py.
+Key features:
+1. DEER fixed-point iteration (no Newton solve needed)
+2. Multiple time discretization schemes: backward_euler, trapezoidal, bdf2
+3. Parallel associative scan for O(log N) depth
 
 This example shows how to:
 1. Generate a reference trajectory with known (true) parameters
-2. Select which parameters to optimize (e.g., only capacitors)
-3. Perturb ONLY the selected parameters for initial guess (keep others at true values)
-4. Use the optimizer to recover the true parameters for selected parameters only
-5. Validate that fixed parameters remain unchanged
-
-Supported discretization methods:
-- backward_euler: First-order implicit (A-stable, L-stable)
-- trapezoidal: Second-order implicit (A-stable) - default
-- bdf2 through bdf6: Higher-order BDF methods
+2. Select which parameters to optimize
+3. Perturb ONLY the selected parameters for initial guess
+4. Use the DEER optimizer to recover the true parameters
+5. Compare different time discretization methods
 """
 
 # Load config and set JAX platform BEFORE importing JAX modules
 import os
+import sys
 import argparse
 import yaml
+from pathlib import Path
 
-# Valid discretization methods
-VALID_METHODS = ['backward_euler', 'trapezoidal', 'bdf2', 'bdf3', 'bdf4', 'bdf5', 'bdf6']
+# Add src to path for deer module imports
+sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 
 def load_config(config_path: str) -> dict:
@@ -46,7 +49,7 @@ def setup_jax_device(config: dict):
 
 # Parse args and configure JAX before other imports
 def _init():
-    parser = argparse.ArgumentParser(description="DAE Parameter Identification")
+    parser = argparse.ArgumentParser(description="DEER-based DAE Parameter Identification")
     parser.add_argument(
         '--config', '-c',
         type=str,
@@ -56,15 +59,14 @@ def _init():
     parser.add_argument(
         '--method', '-m',
         type=str,
-        default=None,
-        choices=VALID_METHODS,
-        help=f'Time discretization method. Choices: {VALID_METHODS}. Default: trapezoidal (or from config)'
+        default='trapezoidal',
+        choices=['backward_euler', 'trapezoidal', 'bdf2', 'bdf3', 'bdf4', 'bdf5', 'bdf6'],
+        help='Time discretization method'
     )
     args, _ = parser.parse_known_args()
     config = load_config(args.config)
     device = setup_jax_device(config)
-    method = args.method  # May be None if not specified
-    return config, device, method
+    return config, device, args.method
 
 
 _config, _device, _method = _init()
@@ -73,25 +75,16 @@ _config, _device, _method = _init()
 import numpy as np
 import json
 from src.discrete_adjoint.dae_solver import DAESolver
-from src.discrete_adjoint.dae_jacobian import DAEOptimizer
+from src.discrete_adjoint.dae_optimizer_deer_methods import DAEOptimizerDEERMethods
 
 
-def example_parameter_identification(config: dict, method: str = None):
-    """
-    Example: Identify DAE parameters from output trajectory.
-
-    Args:
-        config: Configuration dictionary
-        method: Time discretization method. If None, uses 'trapezoidal' or value from config.
-    """
-    # Determine method: CLI arg > config > default
-    if method is None:
-        method = config.get('optimizer', {}).get('method', 'trapezoidal')
+def example_parameter_identification_deer(config: dict, method: str):
+    """Example: Identify DAE parameters using DEER-based optimizer."""
 
     print("=" * 80)
-    print("DAE Parameter Identification Example")
+    print("DEER-based DAE Parameter Identification Example")
+    print(f"(Using {method} time discretization)")
     print("=" * 80)
-    print(f"Discretization method: {method}")
 
     # Extract config sections
     solver_cfg = config['dae_solver']
@@ -121,7 +114,7 @@ def example_parameter_identification(config: dict, method: str = None):
     for name, val in zip(param_names, p_true):
         print(f"  {name:20s} = {val:.6f}")
 
-    # Solve DAE with true parameters
+    # Solve DAE with true parameters (using IDA for reference)
     solver_true = DAESolver(dae_data)
     t_span = (solver_cfg['start_time'], solver_cfg['stop_time'])
     ncp = solver_cfg['ncp']
@@ -174,22 +167,28 @@ def example_parameter_identification(config: dict, method: str = None):
 
     print("\nInitial parameter guess:")
     for i, (name, val_true, val_init) in enumerate(zip(param_names, p_true, p_init)):
-        error = abs(val_init - val_true) / abs(val_true) * 100
+        error = abs(val_init - val_true) / abs(val_true) * 100 if val_true != 0 else 0
         status = 'Will optimize' if i in optimize_indices else 'Fixed (true value)'
         print(f"  {name:20s} = {val_init:.6f}  (true: {val_true:.6f}, error: {error:>6.1f}%, {status})")
 
     # Create modified DAE data with initial parameters
     dae_data_init = dae_data.copy()
+    dae_data_init['parameters'] = [p.copy() for p in dae_data['parameters']]
     for i, p_dict in enumerate(dae_data_init['parameters']):
         p_dict['value'] = float(p_init[i])
 
-    # Step 4: Optimize parameters
+    # Step 4: Optimize parameters using DEER-based optimizer
     print("\n" + "=" * 80)
-    print("Step 4: Optimize Parameters")
+    print(f"Step 4: Optimize Parameters (DEER with {method})")
     print("=" * 80)
 
-    # Create optimizer with selected parameters and method
-    optimizer = DAEOptimizer(dae_data_init, optimize_params=opt_params, method=method)
+    # Create DEER optimizer with selected parameters and method
+    optimizer = DAEOptimizerDEERMethods(
+        dae_data_init,
+        optimize_params=opt_params,
+        method=method,
+        deer_max_iter=50,
+    )
 
     # Run optimization
     # Only pass initial values for parameters being optimized
@@ -221,8 +220,8 @@ def example_parameter_identification(config: dict, method: str = None):
 
     for i, (name, val_true, val_init) in enumerate(zip(param_names, p_true, p_init)):
         val_opt = p_opt_all[i]
-        error_init = abs(val_init - val_true) / abs(val_true) * 100
-        error_opt = abs(val_opt - val_true) / abs(val_true) * 100
+        error_init = abs(val_init - val_true) / abs(val_true) * 100 if val_true != 0 else 0
+        error_opt = abs(val_opt - val_true) / abs(val_true) * 100 if val_true != 0 else 0
         status = 'Optimized' if name in optimizer.optimize_params else 'Fixed'
         print(f"{name:<20} {val_true:>12.6f} {val_init:>12.6f} {val_opt:>12.6f} {error_opt:>11.2f}% {status:>12}")
 
@@ -238,8 +237,9 @@ def example_parameter_identification(config: dict, method: str = None):
     print("Step 6: Validate Optimized Parameters")
     print("=" * 80)
 
-    # Solve DAE with optimized parameters
+    # Solve DAE with optimized parameters (using IDA for validation)
     dae_data_opt = dae_data.copy()
+    dae_data_opt['parameters'] = [p.copy() for p in dae_data['parameters']]
     for i, p_dict in enumerate(dae_data_opt['parameters']):
         p_dict['value'] = float(p_opt_all[i])
 
@@ -268,8 +268,45 @@ def example_parameter_identification(config: dict, method: str = None):
     try:
         import matplotlib.pyplot as plt
 
-        # Plot 1: Optimization history
-        optimizer.plot_optimization_history()
+        # Plot 1: Loss and gradient history
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+        ax = axes[0, 0]
+        ax.semilogy(result_opt['history']['loss'], 'b-', linewidth=2)
+        ax.set_xlabel('Iteration')
+        ax.set_ylabel('Loss')
+        ax.set_title('Loss Function')
+        ax.grid(True, alpha=0.3)
+
+        ax = axes[0, 1]
+        ax.semilogy(result_opt['history']['gradient_norm'], 'r-', linewidth=2)
+        ax.set_xlabel('Iteration')
+        ax.set_ylabel('Gradient Norm')
+        ax.set_title('Gradient Norm')
+        ax.grid(True, alpha=0.3)
+
+        # Plot parameter evolution
+        ax = axes[1, 0]
+        params_array = np.array(result_opt['history']['params'])
+        for i in range(params_array.shape[1]):
+            ax.plot(params_array[:, i], label=f'{optimizer.optimize_params[i]}', linewidth=2)
+        ax.set_xlabel('Iteration')
+        ax.set_ylabel('Parameter Value')
+        ax.set_title('Parameter Evolution')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # Plot timing
+        ax = axes[1, 1]
+        times = np.array(result_opt['history']['time_per_iter']) * 1000
+        ax.plot(times, 'g-', linewidth=2)
+        ax.set_xlabel('Iteration')
+        ax.set_ylabel('Time (ms)')
+        ax.set_title('Time per Iteration')
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.suptitle(f'DEER Optimizer History ({method})', y=1.02)
 
         # Plot 2: Trajectory comparison
         fig, axes = plt.subplots(2, 1, figsize=(12, 10))
@@ -282,7 +319,7 @@ def example_parameter_identification(config: dict, method: str = None):
             ax.plot(t_ref, y_opt[i, :], 'r--', linewidth=2, label=f'Optimized (output {i})')
         ax.set_xlabel('Time')
         ax.set_ylabel('Output')
-        ax.set_title('Trajectory Comparison: True vs Optimized')
+        ax.set_title(f'Trajectory Comparison: True vs Optimized (DEER {method})')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -313,7 +350,7 @@ def example_parameter_identification(config: dict, method: str = None):
 if __name__ == "__main__":
     # Config already loaded at module init (for JAX device setup)
     print(f"\nUsing device: {_device}")
-    print(f"Method: {_method if _method else 'from config or default (trapezoidal)'}")
+    print(f"Using method: {_method}")
     print("\n")
-    print("RUNNING FULL PARAMETER IDENTIFICATION EXAMPLE")
-    example_parameter_identification(_config, method=_method)
+    print("RUNNING DEER-BASED PARAMETER IDENTIFICATION EXAMPLE")
+    example_parameter_identification_deer(_config, _method)

@@ -1,12 +1,10 @@
 """
-Example demonstrating the DAE optimizer for parameter identification.
+Example demonstrating the Parallel DAE optimizer for parameter identification.
 
-This example shows how to:
-1. Generate a reference trajectory with known (true) parameters
-2. Select which parameters to optimize (e.g., only capacitors)
-3. Perturb ONLY the selected parameters for initial guess (keep others at true values)
-4. Use the optimizer to recover the true parameters for selected parameters only
-5. Validate that fixed parameters remain unchanged
+This example is identical to example_optimizer.py but uses the 
+DAEOptimizerParallel class which exploits parallel associative scans
+for the adjoint solver, providing massive speedups on GPUs/TPUs
+for long trajectories.
 
 Supported discretization methods:
 - backward_euler: First-order implicit (A-stable, L-stable)
@@ -46,7 +44,7 @@ def setup_jax_device(config: dict):
 
 # Parse args and configure JAX before other imports
 def _init():
-    parser = argparse.ArgumentParser(description="DAE Parameter Identification")
+    parser = argparse.ArgumentParser(description="DAE Parameter Identification (Parallel)")
     parser.add_argument(
         '--config', '-c',
         type=str,
@@ -73,12 +71,13 @@ _config, _device, _method = _init()
 import numpy as np
 import json
 from src.discrete_adjoint.dae_solver import DAESolver
-from src.discrete_adjoint.dae_jacobian import DAEOptimizer
+# Import the parallel optimizer
+from src.discrete_adjoint.dae_optimizer_parallel import DAEOptimizerParallel
 
 
 def example_parameter_identification(config: dict, method: str = None):
     """
-    Example: Identify DAE parameters from output trajectory.
+    Example: Identify DAE parameters from output trajectory using Parallel Optimizer.
 
     Args:
         config: Configuration dictionary
@@ -89,9 +88,10 @@ def example_parameter_identification(config: dict, method: str = None):
         method = config.get('optimizer', {}).get('method', 'trapezoidal')
 
     print("=" * 80)
-    print("DAE Parameter Identification Example")
+    print("DAE Parallel Parameter Identification Example")
     print("=" * 80)
     print(f"Discretization method: {method}")
+    print("Using: DAEOptimizerParallel (O(log N) adjoint solve)")
 
     # Extract config sections
     solver_cfg = config['dae_solver']
@@ -185,11 +185,11 @@ def example_parameter_identification(config: dict, method: str = None):
 
     # Step 4: Optimize parameters
     print("\n" + "=" * 80)
-    print("Step 4: Optimize Parameters")
+    print("Step 4: Optimize Parameters (Parallel)")
     print("=" * 80)
 
     # Create optimizer with selected parameters and method
-    optimizer = DAEOptimizer(dae_data_init, optimize_params=opt_params, method=method)
+    optimizer = DAEOptimizerParallel(dae_data_init, optimize_params=opt_params, method=method)
 
     # Run optimization
     # Only pass initial values for parameters being optimized
@@ -315,5 +315,5 @@ if __name__ == "__main__":
     print(f"\nUsing device: {_device}")
     print(f"Method: {_method if _method else 'from config or default (trapezoidal)'}")
     print("\n")
-    print("RUNNING FULL PARAMETER IDENTIFICATION EXAMPLE")
+    print("RUNNING PARALLEL PARAMETER IDENTIFICATION EXAMPLE")
     example_parameter_identification(_config, method=_method)
