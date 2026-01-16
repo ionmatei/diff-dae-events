@@ -173,14 +173,39 @@ def solve_adjoint_system_multiple_rhs(
         >>>
         >>> LAM = solve_adjoint_system_multiple_rhs(J_prev_list, J_curr_list, B)
     """
-    # Vectorize solve over the last dimension (n_rhs)
-    solve_fn = jax.vmap(
-        lambda b: solve_adjoint_system(J_prev_list, J_curr_list, b),
-        in_axes=1,   # vmap over last axis of B
-        out_axes=1   # output should also have n_rhs in last axis
-    )
+    # Convert to arrays if needed
+    if isinstance(J_prev_list, list):
+        J_prev = jnp.array(J_prev_list)
+    else:
+        J_prev = J_prev_list
 
-    return solve_fn(B)
+    if isinstance(J_curr_list, list):
+        J_curr = jnp.array(J_curr_list)
+    else:
+        J_curr = J_curr_list
+
+    N, m, _ = J_curr.shape
+    n_rhs = B.shape[2]
+
+    # Vectorize solve over the last dimension (n_rhs)
+    # B has shape (N, m, n_rhs), we want to vmap over n_rhs dimension
+    def solve_single_rhs(b_single):
+        # b_single has shape (N, m)
+        return solve_adjoint_system(J_prev, J_curr, b_single)
+
+    # Transpose B to (n_rhs, N, m) for vmapping
+    B_transposed = jnp.transpose(B, (2, 0, 1))
+
+    # vmap over first dimension (n_rhs)
+    solve_fn = jax.vmap(solve_single_rhs, in_axes=0, out_axes=0)
+
+    # LAM_transposed has shape (n_rhs, N, m)
+    LAM_transposed = solve_fn(B_transposed)
+
+    # Transpose back to (N, m, n_rhs)
+    LAM = jnp.transpose(LAM_transposed, (1, 2, 0))
+
+    return LAM
 
 
 def compute_parameter_sensitivity(
@@ -245,9 +270,8 @@ def verify_adjoint_solution(
     J_prev_list: Union[List[np.ndarray], jnp.ndarray],
     J_curr_list: Union[List[np.ndarray], jnp.ndarray],
     b: jnp.ndarray,
-    lam: jnp.ndarray,
-    verbose: bool = True
-) -> Tuple[jnp.ndarray, float]:
+    lam: jnp.ndarray
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Verify the adjoint solution by computing residual norms.
 
@@ -258,11 +282,14 @@ def verify_adjoint_solution(
         J_curr_list: Jacobian blocks dr_{k+1}/dy_{k+1}
         b: Right-hand side vectors
         lam: Computed adjoint solution
-        verbose: If True, print verification results
 
     Returns:
         residuals: Residual vector at each time step, shape (N, m)
         max_residual: Maximum residual norm across all time steps
+
+    Note:
+        This function is JIT-compatible. For verbose output, use the
+        print_verification_results() helper function after calling this.
     """
     # Convert to arrays if needed
     if isinstance(J_prev_list, list):
@@ -276,34 +303,50 @@ def verify_adjoint_solution(
         J_curr = J_curr_list
 
     N, m, _ = J_curr.shape
-    residuals = jnp.zeros((N, m))
 
-    # Compute residuals for k = 0 to N-2
-    for k in range(N - 1):
-        res_k = J_curr[k].T @ lam[k] + J_prev[k + 1].T @ lam[k + 1] - b[k]
-        residuals = residuals.at[k].set(res_k)
+    # Vectorized computation using vmap for better stability
+    # For k = 0 to N-2: residual[k] = J_curr[k].T @ lam[k] + J_prev[k+1].T @ lam[k+1] - b[k]
+    def compute_residual_interior(k):
+        return J_curr[k].T @ lam[k] + J_prev[k + 1].T @ lam[k + 1] - b[k]
+
+    # Compute interior residuals (k = 0 to N-2)
+    k_indices = jnp.arange(N - 1)
+    residuals_interior = jax.vmap(compute_residual_interior)(k_indices)
 
     # Terminal residual (k = N-1)
-    residuals = residuals.at[N - 1].set(J_curr[-1].T @ lam[-1] - b[-1])
+    residual_terminal = J_curr[-1].T @ lam[-1] - b[-1]
+
+    # Combine all residuals
+    residuals = jnp.concatenate([residuals_interior, residual_terminal[None, :]], axis=0)
 
     # Compute norms
     residual_norms = jnp.linalg.norm(residuals, axis=1)
     max_residual = jnp.max(residual_norms)
+
+    return residuals, max_residual
+
+
+def print_verification_results(residuals: jnp.ndarray, max_residual: float):
+    """
+    Print verification results (non-JIT helper function).
+
+    Args:
+        residuals: Residual vectors from verify_adjoint_solution
+        max_residual: Maximum residual norm
+    """
+    residual_norms = jnp.linalg.norm(residuals, axis=1)
     mean_residual = jnp.mean(residual_norms)
 
-    if verbose:
-        print(f"Adjoint solution verification:")
-        print(f"  Max residual:  {max_residual:.6e}")
-        print(f"  Mean residual: {mean_residual:.6e}")
+    print(f"Adjoint solution verification:")
+    print(f"  Max residual:  {max_residual:.6e}")
+    print(f"  Mean residual: {mean_residual:.6e}")
 
-        if max_residual < 1e-10:
-            print(f"  ✓ Solution verified successfully!")
-        elif max_residual < 1e-6:
-            print(f"  ⚠ Solution acceptable (residual < 1e-6)")
-        else:
-            print(f"  ✗ Solution may be inaccurate (residual > 1e-6)")
-
-    return residuals, float(max_residual)
+    if max_residual < 1e-10:
+        print(f"  ✓ Solution verified successfully!")
+    elif max_residual < 1e-6:
+        print(f"  ⚠ Solution acceptable (residual < 1e-6)")
+    else:
+        print(f"  ✗ Solution may be inaccurate (residual > 1e-6)")
 
 
 # JIT-compiled versions for production use
@@ -358,7 +401,8 @@ if __name__ == "__main__":
 
     # Verify solution
     print("\nVerifying solution...")
-    _, max_res = verify_adjoint_solution_jit(J_prev, J_curr, b, lam, verbose=True)
+    residuals, max_res = verify_adjoint_solution_jit(J_prev, J_curr, b, lam)
+    print_verification_results(residuals, max_res)
 
     # Test 2: Multiple RHS
     print("\n" + "=" * 80)
@@ -377,7 +421,8 @@ if __name__ == "__main__":
     # Verify each RHS
     for i in range(n_rhs):
         print(f"\nVerifying RHS {i+1}:")
-        _, _ = verify_adjoint_solution_jit(J_prev, J_curr, B[:, :, i], LAM[:, :, i], verbose=True)
+        residuals_i, max_res_i = verify_adjoint_solution_jit(J_prev, J_curr, B[:, :, i], LAM[:, :, i])
+        print_verification_results(residuals_i, max_res_i)
 
     # Test 3: Parameter sensitivity
     print("\n" + "=" * 80)
@@ -457,9 +502,10 @@ if __name__ == "__main__":
 
             # Verify
             print("\nVerifying DAE adjoint solution...")
-            _, max_res_dae = verify_adjoint_solution_jit(
-                J_prev_list, J_curr_list, dL_dy_dae, lam_dae, verbose=True
+            residuals_dae, max_res_dae = verify_adjoint_solution_jit(
+                J_prev_list, J_curr_list, dL_dy_dae, lam_dae
             )
+            print_verification_results(residuals_dae, max_res_dae)
 
             # Compute parameter sensitivity
             print("\nComputing parameter sensitivity for DAE...")
@@ -534,9 +580,10 @@ if __name__ == "__main__":
 
     # Verify large solution
     print("\nVerifying large-scale solution...")
-    _, max_res_large = verify_adjoint_solution_jit(
-        J_prev_large, J_curr_large, b_large, lam_large, verbose=True
+    residuals_large, max_res_large = verify_adjoint_solution_jit(
+        J_prev_large, J_curr_large, b_large, lam_large
     )
+    print_verification_results(residuals_large, max_res_large)
 
     print("\n" + "=" * 80)
     print("All tests completed successfully!")

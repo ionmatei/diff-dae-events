@@ -23,3 +23,47 @@ Create a new files where such an algorithm will be implemented.
 
 
 
+
+
+import jax
+import jax.numpy as jnp
+
+def solve_bidiag_transpose(C, P_next, b):
+    """
+    Solve for lambdas in:
+      C[k].T @ lam[k] + P_next[k].T @ lam[k+1] = b[k]   for k=0..N-2
+      C[N-1].T @ lam[N-1] = b[N-1]
+
+    Inputs:
+      C:      (N, m, m)      where C[k] = dr_k/dy_k
+      P_next: (N-1, m, m)    where P_next[k] = dr_{k+2}/dy_{k+1} in 1-based indexing
+                             i.e., P_next[k] corresponds to P_{k+2} in math above,
+                             and appears as P_next[k].T @ lam[k+1]
+      b:      (N, m)
+
+    Output:
+      lam:    (N, m)
+    """
+    N, m, _ = C.shape
+
+    # Terminal solve: C_N^T lam_N = b_N
+    lamN = jnp.linalg.solve(C[-1].T, b[-1])
+
+    # Backward steps: k = N-2 .. 0
+    def step(lam_next, inputs):
+        Ck, Pkp1, bk = inputs
+        rhs = bk - Pkp1.T @ lam_next
+        lam_k = jnp.linalg.solve(Ck.T, rhs)
+        return lam_k, lam_k
+
+    inputs = (C[:-1][::-1], P_next[::-1], b[:-1][::-1])
+    _, lam_rev = jax.lax.scan(step, lamN, inputs)
+    lam = jnp.concatenate([lam_rev[::-1], lamN[None, :]], axis=0)
+    return lam
+
+solve_bidiag_transpose_jit = jax.jit(solve_bidiag_transpose)
+
+
+
+
+

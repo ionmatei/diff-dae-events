@@ -895,6 +895,7 @@ class DAESolver:
               ncp: int = 500,
               rtol: float = 1e-6,
               atol: float = 1e-8,
+              verbose: bool = False,
               **kwargs) -> Dict:
         """
         Solve the DAE using SUNDIALS IDA.
@@ -904,6 +905,7 @@ class DAESolver:
             ncp: number of communication points (output points)
             rtol: Relative tolerance
             atol: Absolute tolerance
+            verbose: If True, print solver progress information
             **kwargs: Additional arguments to IDA solver
 
         Returns:
@@ -916,9 +918,10 @@ class DAESolver:
                 - alg_names: names of algebraic variables
                 - output_names: names of outputs
         """
-        print(f"\nSolving DAE from t={t_span[0]} to t={t_span[1]} using SUNDIALS IDA")
-        print(f"  Output points: {ncp}")
-        print(f"  Tolerances: rtol={rtol}, atol={atol}")
+        if verbose:
+            print(f"\nSolving DAE from t={t_span[0]} to t={t_span[1]} using SUNDIALS IDA")
+            print(f"  Output points: {ncp}")
+            print(f"  Tolerances: rtol={rtol}, atol={atol}")
 
         # Combine initial conditions: y0 = [x0, z0]
         y0 = np.concatenate([self.x0, self.z0])
@@ -926,18 +929,20 @@ class DAESolver:
         n_total = len(y0)
 
         # Check initial algebraic constraints
-        print(f"\nChecking initial conditions...")
-        print(f"  Initial differential states (x0): {self.x0}")
-        print(f"  Initial algebraic variables (z0): {self.z0}")
+        if verbose:
+            print(f"\nChecking initial conditions...")
+            print(f"  Initial differential states (x0): {self.x0}")
+            print(f"  Initial algebraic variables (z0): {self.z0}")
 
         g0 = self.eval_g(t_span[0], self.x0, self.z0)
-        print(f"  Initial algebraic constraint residuals g(t0, x0, z0):")
-        for i, (name, val) in enumerate(zip(self.alg_names, g0)):
-            print(f"    {name}: {val:.6e}")
+        if verbose:
+            print(f"  Initial algebraic constraint residuals g(t0, x0, z0):")
+            for i, (name, val) in enumerate(zip(self.alg_names, g0)):
+                print(f"    {name}: {val:.6e}")
 
-        if np.max(np.abs(g0)) > 1e-6:
-            print(f"  WARNING: Initial algebraic constraints not satisfied (max residual: {np.max(np.abs(g0)):.6e})")
-            print(f"  IDA will try to compute consistent initial conditions...")
+            if np.max(np.abs(g0)) > 1e-6:
+                print(f"  WARNING: Initial algebraic constraints not satisfied (max residual: {np.max(np.abs(g0)):.6e})")
+                print(f"  IDA will try to compute consistent initial conditions...")
 
         # Initial derivatives: ydot0 = [f(t0, x0, z0), 0]
         # Differential variables have non-zero derivatives
@@ -945,7 +950,8 @@ class DAESolver:
         f0 = self.eval_f(t_span[0], self.x0, self.z0)
         ydot0 = np.concatenate([f0, np.zeros(len(self.z0))])
 
-        print(f"  Initial derivatives f(t0, x0, z0): {f0}")
+        if verbose:
+            print(f"  Initial derivatives f(t0, x0, z0): {f0}")
 
         # Create IDA solver
         solver = dae(
@@ -969,14 +975,16 @@ class DAESolver:
         tspan = np.linspace(t_span[0], t_span[1], ncp)
 
         # Solve
-        print("Starting integration...")
+        if verbose:
+            print("Starting integration...")
         sol = solver.solve(tspan, y0, ydot0)
 
-        if not sol.flag:
+        if not sol.flag and verbose:
             print(f"Warning: Solver flag indicates potential issues")
 
-        print(f"Integration completed successfully!")
-        print(f"  Time steps: {len(sol.values.t)}")
+        if verbose:
+            print(f"Integration completed successfully!")
+            print(f"  Time steps: {len(sol.values.t)}")
 
         # Extract results
         t = sol.values.t

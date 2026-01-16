@@ -36,19 +36,19 @@
     {
       "name": "DER_C5_v",
       "type": "float",
-      "start": null,
+      "start": 0.0,
       "orig_name": "$DER.C5.v"
     },
     {
       "name": "DER_C3_v",
       "type": "float",
-      "start": null,
+      "start": 0.0,
       "orig_name": "$DER.C3.v"
     },
     {
       "name": "DER_C1_v",
       "type": "float",
-      "start": null,
+      "start": 0.0,
       "orig_name": "$DER.C1.v"
     }
   ],
