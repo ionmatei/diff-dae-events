@@ -17,3 +17,6 @@ Operating Instructions (must follow):
 - Do NOT generate summaries unless the user explicitly asks for a summary.
 - If the user wants a “quick take,” “recap,” or “TL;DR,” treat that as an explicit request for a summary.
 
+5) Documentation updates
+- Do not generate documentation updates  unless the user explicitly asks for an update.
+

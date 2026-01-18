@@ -349,7 +349,9 @@ class DAEOptimizerDEERMethods:
                 return matmul_recursive(M0invM1, M0invz, y0)
 
         elif method.startswith('bdf'):
-            # Generic BDF handler for orders 2-6
+            # Generic BDF handler for orders 2-6 using COMPANION MATRIX construction
+            # This transforms the q-step recurrence into a first-order block system
+            # suitable for parallel associative scan via matmul_recursive
             bdf_order = int(method[3])
             coeffs, _ = BDF_COEFFICIENTS[bdf_order]
             coeffs = jnp.array(coeffs, dtype=jnp.float64)
@@ -358,7 +360,7 @@ class DAEOptimizerDEERMethods:
             def implicit_residual_bdf(y_shifts, t_i, dt, p, step_idx):
                 """
                 Generic BDF residual.
-                y_shifts: list of [y_i, y_{i-1}, y_{i-2}, ...] up to order terms
+                y_shifts: list of [y_i, y_{i-1}, y_{i-2}, ...] up to order terms extracted from augmented state
                 For early steps, falls back to lower-order BDF.
                 """
                 y_i = y_shifts[0]
@@ -393,55 +395,122 @@ class DAEOptimizerDEERMethods:
                 return jnp.concatenate([R_x, g_i])
 
             def deer_func(yshifts, xinput, params):
-                """DEER function for BDF"""
+                """
+                DEER function for BDF with companion matrix.
+
+                yshifts: [Y_i, Y_{i-1}] where each Y is augmented state of size (q*n_y)
+                         Y_i = [y_i; y_{i-1}; ...; y_{i-q+1}]
+
+                Returns: Augmented residual of size (q*n_y) matching the augmented state.
+                         R_aug = [R_phys(y_i); y_{i-1} - y_i_from_Y_{i-1}; y_{i-2} - y_{i-1}_from_Y_{i-1}; ...]
+                """
                 dt, t_i, step_idx = xinput
-                return implicit_residual_bdf(yshifts, t_i, dt, params, step_idx)
+                Y_i, Y_im1 = yshifts  # Each is augmented state of size (q*n_y)
+
+                ny = n_states + n_alg
+
+                # Extract individual history terms from augmented states
+                # Y_i contains [y_i; y_{i-1}; ...; y_{i-q+1}]
+                # Y_{i-1} contains [y_{i-1}; y_{i-2}; ...; y_{i-q}]
+                # We need [y_i, y_{i-1}, ..., y_{i-q}] for the BDF formula
+
+                y_history = []
+                for k in range(n_history):
+                    y_k = Y_i[k*ny:(k+1)*ny]
+                    y_history.append(y_k)
+                # Get the last term y_{i-q} from Y_{i-1}
+                y_iq = Y_im1[-ny:]
+                y_history.append(y_iq)
+
+                # Compute physical residual for y_i
+                R_phys = implicit_residual_bdf(y_history, t_i, dt, params, step_idx)  # size ny
+
+                # Compute history consistency residuals
+                # These enforce that the history in Y_i matches shifted history from Y_{i-1}
+                R_hist = []
+                for k in range(n_history - 1):
+                    # y_{i-k-1} from Y_i should equal y_{i-k} from Y_{i-1}
+                    y_from_Yi = Y_i[(k+1)*ny:(k+2)*ny]  # y_{i-k-1} in Y_i
+                    y_from_Yim1 = Y_im1[k*ny:(k+1)*ny]  # y_{i-k} in Y_{i-1}
+                    R_hist.append(y_from_Yi - y_from_Yim1)
+
+                # Concatenate all residuals
+                return jnp.concatenate([R_phys] + R_hist)
 
             def shifter_func(y, _):
-                """Shift: [y_i, y_{i-1}, ..., y_{i-order}]"""
-                shifts = [y]
-                for k in range(1, n_history + 1):
-                    # y_{i-k}: shift by k positions, pad with y[0]
-                    y_shifted = jnp.concatenate([jnp.tile(y[:1], (k, 1)), y[:-k]], axis=0)
-                    shifts.append(y_shifted)
-                return shifts
+                """
+                Shifter for companion matrix approach.
 
-            p_num = n_history + 1
+                Instead of returning [y_i, y_{i-1}, ..., y_{i-q}], we return
+                the augmented state Y_i = [y_i, y_{i-1}] where the companion
+                matrix structure handles the full history implicitly.
+
+                For BDF methods, we use a 2-term companion form:
+                    Y_i = [y_i; y_{i-1}; ...; y_{i-q+1}]
+                where Y_i is the augmented state of size (q * n_y).
+
+                This shifter returns [Y_i, Y_{i-1}] for the parallel scan.
+                """
+                # y has shape (nsamples, q*n_y) - augmented state
+                y_im1 = jnp.concatenate([y[:1], y[:-1]], axis=0)
+                return [y, y_im1]
+
+            p_num = 2  # Companion form is always 2-term recurrence
 
             def solve_inv_lin(jacs, z, inv_lin_params):
-                """Solve BDF linear system with multiple history terms"""
-                # jacs is a list of [M0, M1, M2, ...] Jacobians
+                """
+                Solve BDF linear system using companion matrix + parallel associative scan.
+
+                With the augmented residual approach:
+                - deer_func returns residuals of size (nsamples, q*ny)
+                - Jacobians are (nsamples, q*ny, q*ny)
+                - We solve: M0 @ Y_i + M1 @ Y_{i-1} = z for 2-term recurrence
+
+                Args:
+                    jacs: List [M0, M1] of Jacobians, each shape (nsamples, q*ny, q*ny)
+                    z: Residuals of shape (nsamples, q*ny)
+                    inv_lin_params: Tuple containing (y0,) initial condition (size ny, physical state)
+
+                Returns:
+                    Y_full: Augmented state trajectory (nsamples, q*ny)
+                """
                 y0, = inv_lin_params
-
                 nsamples = z.shape[0]
+                ny = y0.shape[0]  # Size of physical state
 
-                # For multi-step methods, solve sequentially
-                # (parallel scan only works for 2-term recurrences)
-                def solve_step(carry, inputs):
-                    y_history = carry  # tuple of (y_{i-1}, y_{i-2}, ..., y_{i-order})
-                    jac_inputs = inputs[:-1]  # M0, M1, ..., M_order
-                    z_i = inputs[-1]
+                # M0 and M1 are the Jacobians for the 2-term recurrence
+                M0, *M_rest = jacs  # M0: (nsamples, q*ny, q*ny), M_rest: [M1]
 
-                    # Solve: M0 @ y_i = z_i - sum(M_k @ y_{i-k})
-                    M0_i = jac_inputs[0]
-                    rhs = z_i
-                    for k in range(1, n_history + 1):
-                        rhs = rhs - jac_inputs[k] @ y_history[k-1]
-                    y_i = jnp.linalg.solve(M0_i, rhs)
+                # For 2-term recurrence: just use M0 and M1 directly
+                M_aug_all = M0  # (nsamples, q*ny, q*ny)
+                M_shift_all = M_rest[0] if len(M_rest) > 0 else jnp.zeros_like(M0)
 
-                    # Shift history
-                    new_history = (y_i,) + y_history[:-1]
-                    return new_history, y_i
+                # Build augmented initial condition: Y0 = [y0; y0; ...; y0]
+                Y0 = jnp.tile(y0, n_history)  # shape (q*ny,)
 
-                # Initial history: all y0
-                init_history = tuple(y0 for _ in range(n_history))
+                # For timesteps 1 to nsamples-1 (excluding initial timestep 0)
+                M_aug_scan = M_aug_all[1:]      # shape (nsamples-1, q*ny, q*ny)
+                M_shift_scan = M_shift_all[1:]  # shape (nsamples-1, q*ny, q*ny)
+                z_aug_scan = z[1:]              # shape (nsamples-1, q*ny)
 
-                # Prepare inputs: (M0[1:], M1[1:], ..., z[1:])
-                scan_inputs = tuple(jac[1:] for jac in jacs) + (z[1:],)
+                # Solve: M_aug @ Y_i = z - M_shift @ Y_{i-1}
+                # Compute: M_aug^{-1} @ (-M_shift)
+                M_aug_inv_M_shift = -vmap(jnp.linalg.solve)(M_aug_scan, M_shift_scan)
+                # Compute: M_aug^{-1} @ z_aug
+                M_aug_inv_z = vmap(jnp.linalg.solve)(M_aug_scan, z_aug_scan)
 
-                _, y_result = scan(solve_step, init_history, scan_inputs)
+                # Parallel scan: Y_i = A_i @ Y_{i-1} + b_i
+                # mat mul_recursive returns results for all input timesteps (nsamples-1)
+                Y_result = matmul_recursive(M_aug_inv_M_shift, M_aug_inv_z, Y0)
+                # Y_result has shape (nsamples-1, q*ny) according to input shape
 
-                return jnp.concatenate([y0[None, :], y_result], axis=0)
+                # Prepend Y0 to get full trajectory including initial condition
+                Y_full = jnp.concatenate([Y0[None, :], Y_result], axis=0)
+                # Y_full should have shape (nsamples, q*ny)
+
+                # Return only nsamples elements to match input size
+                # (in case matmul_recursive added an extra element)
+                return Y_full[:nsamples]
 
         # Store method-specific functions
         self._deer_func = deer_func
@@ -458,24 +527,34 @@ class DAEOptimizerDEERMethods:
             nsamples = len(t_array)
             ny = n_total
 
-            # Initial guess: constant y0
-            yinit_guess = jnp.zeros((nsamples, ny), dtype=jnp.float64) + y0
-
             # Prepare time inputs
             dt_partial = t_array[1:] - t_array[:-1]
             dt = jnp.concatenate([dt_partial[:1], dt_partial], axis=0)
 
             if method == 'backward_euler':
+                # Initial guess: constant y0
+                yinit_guess = jnp.zeros((nsamples, ny), dtype=jnp.float64) + y0
                 xinput = (dt, t_array)
+                inv_lin_params = (y0,)
             elif method == 'trapezoidal':
+                # Initial guess: constant y0
+                yinit_guess = jnp.zeros((nsamples, ny), dtype=jnp.float64) + y0
                 t_im1 = jnp.concatenate([t_array[:1], t_array[:-1]], axis=0)
                 xinput = (dt, t_array, t_im1)
+                inv_lin_params = (y0,)
             elif method.startswith('bdf'):
+                # For BDF with companion matrix, we work with AUGMENTED state
+                # yinit_guess has shape (nsamples, q*ny) where q is BDF order
+                ny_aug = n_history * ny
+                yinit_guess = jnp.zeros((nsamples, ny_aug), dtype=jnp.float64)
+                # Initialize with y0 replicated: [y0; y0; ...; y0]
+                for k in range(n_history):
+                    yinit_guess = yinit_guess.at[:, k*ny:(k+1)*ny].set(y0)
+
                 # Step index for adaptive order selection
                 step_idx = jnp.arange(nsamples, dtype=jnp.float64)
                 xinput = (dt, t_array, step_idx)
-
-            inv_lin_params = (y0,)
+                inv_lin_params = (y0,)
 
             result = deer_iteration(
                 inv_lin=solve_inv_lin,
@@ -493,7 +572,14 @@ class DAEOptimizerDEERMethods:
                 rtol=self.deer_rtol,
             )
 
-            return result.value  # (nsamples, ny)
+            # Extract physical state from result
+            # For BDF, result.value is augmented state (nsamples, q*ny)
+            # We need to extract just y_i from each augmented state
+            if method.startswith('bdf'):
+                y_aug = result.value  # (nsamples, q*ny)
+                return y_aug[:, :ny]  # Extract first ny components
+            else:
+                return result.value  # (nsamples, ny)
 
         self._simulate_deer = simulate_deer
 

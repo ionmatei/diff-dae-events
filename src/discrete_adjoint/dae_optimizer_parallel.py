@@ -54,8 +54,14 @@ class DAEOptimizerParallel(DAEOptimizer):
             grad_p_opt: gradient w.r.t. optimized parameters, shape (n_params_opt,)
         """
         # Step 2: Compute loss gradient dL/dy
-        y_array_T = y_array.T  # shape: (N+1, n_total)
-        dL_dy = self.jac.trajectory_loss_gradient_analytical(t_sol, y_array_T, y_target_use, p_opt_vals_jax)
+        # Ensure y_array is (N+1, n_total) so that dL_dy comes back as (N+1, n_total)
+        # y_array from optimization_step_combined is typically (n_total, N+1)
+        if y_array.shape[0] == self.jac.n_total and y_array.shape[1] == t_sol.shape[0]:
+            y_array_loss = y_array.T
+        else:
+            y_array_loss = y_array
+
+        dL_dy = self.jac.trajectory_loss_gradient_analytical(t_sol, y_array_loss, y_target_use, p_opt_vals_jax)
 
         # Scale by 1/N if using mean loss
         if self.loss_type == 'mean':
