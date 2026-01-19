@@ -1,4 +1,5 @@
 example_optimizer.py - uses the scan-based adjoint solver
 example_optimizer_parallel.py   - uses the scan-based adjoint solver optimized for GPU
 example_optimizer_parallel_v2_true_bdf.py - uses the scan-based adjoint solver but with Jacobian computation on the fly
+src/discrete_adjoint/dae_optimizer_parallel_v2_true_bdf_optimized.py - better - uses the scan-based adjoint solver but with Jacobian computation on the fly
 example_optimizer_deer_methods.py - uses various discretization methods

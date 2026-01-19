@@ -1,0 +1,155 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+
+% Python code styling for listings
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+\lstset{style=mystyle}
+
+\title{Matrix-Free Krylov Solvers for Large Adjoint Systems in JAX}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Problem Formulation}
+
+We consider a large-scale discrete linear system structured over time steps $t = 1, \dots, T$. The governing equation is given by:
+\begin{equation}
+    A_i \lambda_i + A_{i+1} \lambda_{i+1} = b_i, \quad \forall i \in \{1, \dots, T-1\}
+    \label{eq:system}
+\end{equation}
+where:
+\begin{itemize}
+    \item $\lambda_i \in \mathbb{R}^N$ is the unknown state vector at step $i$.
+    \item $b_i \in \mathbb{R}^N$ is the forcing term.
+    \item $A_i \in \mathbb{R}^{N \times N}$ is the Jacobian matrix at step $i$, typically defined as $A_i = \frac{\partial f}{\partial x}(x_i)$ for some dynamics function $f$.
+\end{itemize}
+
+\subsection{Constraint: Memory Efficiency}
+For large $N$ and $T$, explicitly storing the matrices $A_i$ is computationally prohibitive ($O(T \cdot N^2)$ memory). We require an implementation that solves Eq. \eqref{eq:system} using $O(T \cdot N)$ memory by leveraging \textbf{Matrix-Free Krylov methods}.
+
+\section{JAX Implementation Strategy}
+
+The solution utilizes \texttt{jax.scipy.sparse.linalg.gmres}. Instead of passing a materialized matrix, we pass a linear operator function $\mathcal{L}(\lambda)$ that computes the left-hand side of Eq. \eqref{eq:system} on the fly.
+
+\subsection{Forward Mode: The Jacobian-Vector Product (JVP)}
+If $A_i$ represents the standard Jacobian, we compute the product $A_i v$ using Forward-Mode Automatic Differentiation via \texttt{jax.jvp}.
+
+Given a primal trajectory $X = \{x_1, \dots, x_T\}$, the operation is:
+\begin{equation}
+    A_i \lambda_i \equiv \texttt{jvp}(f, x_i, \lambda_i)
+\end{equation}
+This operation computes the product in a single pass without instantiating the Jacobian matrix.
+
+\subsection{Reverse Mode: The Vector-Jacobian Product (VJP)}
+In many adjoint formulations (e.g., backpropagation or sensitivity analysis), the system often involves the \textbf{transpose} $A_i^\top \lambda_i$. In this case, we use Reverse-Mode Automatic Differentiation via \texttt{jax.vjp}:
+\begin{equation}
+    A_i^\top \lambda_i \equiv \texttt{vjp}(f, x_i)(\lambda_i)
+\end{equation}
+
+\section{Algorithm and Code}
+
+The following JAX implementation solves the system without pre-computing matrices. It vectorizes the operation over the time axis using \texttt{jax.vmap}.
+
+\begin{lstlisting}[language=Python, caption=Matrix-Free GMRES Implementation]
+import jax
+import jax.numpy as jnp
+from jax.scipy.sparse.linalg import gmres
+
+def solve_adjoint_system(x_trajectory, b_rhs, f_dynamics):
+    """
+    Solves A_i * lam_i + A_{i+1} * lam_{i+1} = b_i
+    where A_i = Jacobian(f_dynamics) at x_trajectory[i]
+    """
+    
+    T, N = x_trajectory.shape
+
+    # Define the Matrix-Free Linear Operator
+    def matvec_operator(lam):
+        # 1. Helper to compute A * v using JVP (Forward Mode)
+        def apply_jacobian(x, v):
+            # jvp returns (primals_out, tangents_out)
+            # tangents_out is exactly J @ v
+            _, Jv = jax.jvp(f_dynamics, (x,), (v,))
+            return Jv
+
+        # 2. Term 1: A_i * lam_i
+        # Vectorize over time dimension (axis 0)
+        term1 = jax.vmap(apply_jacobian)(x_trajectory, lam)
+
+        # 3. Term 2: A_{i+1} * lam_{i+1}
+        # Shift lambda and x forward by 1 step to align indices
+        lam_shifted = jnp.roll(lam, shift=-1, axis=0)
+        lam_shifted = lam_shifted.at[-1].set(jnp.zeros(N)) # Boundary condition
+        
+        x_shifted = jnp.roll(x_trajectory, shift=-1, axis=0)
+        x_shifted = x_shifted.at[-1].set(jnp.zeros(N))
+
+        term2 = jax.vmap(apply_jacobian)(x_shifted, lam_shifted)
+
+        return term1 + term2
+
+    # Solve using GMRES
+    # JAX traces the operator and optimizes the JVP computations
+    lam_sol, info = gmres(
+        matvec_operator, 
+        b_rhs, 
+        tol=1e-5, 
+        maxiter=100
+    )
+    
+    return lam_sol, info
+
+# Example Usage
+if __name__ == "__main__":
+    # Dummy dynamics: f(x) = sin(x)
+    f = lambda x: jnp.sin(x)
+    
+    # Random data
+    key = jax.random.PRNGKey(0)
+    X = jax.random.normal(key, (100, 50)) # T=100, N=50
+    B = jax.random.normal(key, (100, 50))
+    
+    sol, info = solve_adjoint_system(X, B, f)
+    print(f"Convergence Info: {info}")
+\end{lstlisting}
+
+\section{Summary}
+\begin{itemize}
+    \item \textbf{Memory Complexity:} $O(TN)$ (vs $O(TN^2)$ for explicit matrices).
+    \item \textbf{Compute Complexity:} Dependent on the cost of evaluating $f(x)$. The overhead of JVP is a small constant factor over the forward pass.
+    \item \textbf{Preconditioning:} If convergence is slow, a block-diagonal preconditioner can be implemented by approximating $M \approx \text{diag}(A_1, \dots, A_T)$ and inverting blocks locally.
+\end{itemize}
+
+\end{document}

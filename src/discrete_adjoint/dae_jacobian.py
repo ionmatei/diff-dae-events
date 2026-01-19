@@ -1923,7 +1923,7 @@ class DAEOptimizer:
         t7_end = time.time()
         timings['step_7'] = t7_end - t7_start
 
-        return np.array(p_opt_new), float(loss), np.array(grad_p_opt)
+        return np.array(p_opt_new), float(loss), np.array(grad_p_opt), timings
 
     def optimization_step_combined(
         self,
@@ -2032,7 +2032,7 @@ class DAEOptimizer:
         t27_end = time.time()
         timings['steps_2_7_combined_jit'] = t27_end - t27_start
 
-        return p_opt_new, float(loss), grad_p_opt
+        return p_opt_new, float(loss), grad_p_opt, timings
 
     def optimize(
         self,
@@ -2096,7 +2096,7 @@ class DAEOptimizer:
             t_start = time.time()
 
             # Perform optimization step
-            p_new, loss, grad_p = self.optimization_step_combined(
+            p_new, loss, grad_p, step_timings = self.optimization_step_combined(
                 t_array, y_target, p, step_size
             ) if combined else self.optimization_step(
                 t_array, y_target, p, step_size
@@ -2118,6 +2118,22 @@ class DAEOptimizer:
             self.history['gradient_norm'].append(grad_norm)
             self.history['params'].append(np.array(p))  # Only optimized params
             self.history['params_all'].append(p_all_current)  # All params
+            self.history['step_size'].append(step_size)
+            self.history['time_per_iter'].append(iter_time)
+
+            if verbose and (iteration % 1 == 0):  # Print every iteration for now if verbose
+                print(f"\nIteration {iteration:4d} ({iter_time:.3f}s):")
+                print(f"  Loss:          {loss:.6e}")
+                print(f"  Gradient norm: {grad_norm:.6e}")
+                
+                # Print timing breakdown
+                t_forward = step_timings.get('step_1', 0.0) + step_timings.get('step_1_dae_solve', 0.0)
+                t_adjoint = step_timings.get('steps_2_7_combined_jit', 0.0)
+                if t_adjoint == 0:
+                    t_adjoint = sum(step_timings.get(f'step_{i}', 0.0) for i in range(2, 8))
+                
+                print(f"  Forward solve: {t_forward*1000:.1f}ms")
+                print(f"  Adjoint step:  {t_adjoint*1000:.1f}ms")
             self.history['step_size'].append(step_size)
             self.history['time_per_iter'].append(iter_time)
 
