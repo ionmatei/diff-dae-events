@@ -59,10 +59,11 @@ class DAEOptimizerParallelV2TrueBDFOptimized(DAEOptimizer):
     - 10-100x faster for large systems
     """
 
-    def __init__(self, *args, use_parallel_scan=True, **kwargs):
+    def __init__(self, *args, use_parallel_scan=True, verbose=True, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.use_parallel_scan = use_parallel_scan
+        self.verbose = verbose
 
         # Determine discretization method
         method = self.method.lower()
@@ -79,16 +80,17 @@ class DAEOptimizerParallelV2TrueBDFOptimized(DAEOptimizer):
         else:
             raise ValueError(f"Unknown method: {method}")
 
-        if self.is_bdf and self.bdf_order > 1:
-            print(f"  Using OPTIMIZED TRUE BDF{self.bdf_order} adjoint")
-            print(f"  Matrix-free: VJP-based (no dense Jacobians)")
-            print(f"  Memory: O(N*n) instead of O(N*(qn)²)")
-            if self.use_parallel_scan:
-                print(f"  Parallel scan: O(log N) via structured companion operator")
+        if self.verbose:
+            if self.is_bdf and self.bdf_order > 1:
+                print(f"  Using OPTIMIZED TRUE BDF{self.bdf_order} adjoint")
+                print(f"  Matrix-free: VJP-based (no dense Jacobians)")
+                print(f"  Memory: O(N*n) instead of O(N*(qn)²)")
+                if self.use_parallel_scan:
+                    print(f"  Parallel scan: O(log N) via structured companion operator")
+                else:
+                    print(f"  Sequential scan: O(N) with matrix-free operations")
             else:
-                print(f"  Sequential scan: O(N) with matrix-free operations")
-        else:
-            print(f"  Using optimized {method} with matrix-free adjoint")
+                print(f"  Using optimized {method} with matrix-free adjoint")
 
         # Get BDF coefficients if applicable
         if self.is_bdf:
@@ -256,19 +258,28 @@ class DAEOptimizerParallelV2TrueBDFOptimized(DAEOptimizer):
 
         bdf_coeff = self.bdf_coeffs[0] / h_s
 
-        # Build J_curr^T efficiently (avoid vstack, build directly transposed)
-        # J_curr^T[i,j] = (J_curr[j,i])^T
+        # Build J_curr^T directly (no temporary J_curr allocation or transpose!)
+        # J_curr = [dR_diff; dg_dy] would be (n, n)
+        # J_curr^T should have shape (n, n) with columns from rows of J_curr
 
-        # Top block: dR_diff^T = (α₀/h)I - df_dy^T
-        # Bottom block: dR_alg^T = dg_dy^T
+        # dR_diff = (α₀/h)I - df_dy  (n_states × n)
+        # dg_dy already computed            (n_alg × n)
 
-        # Construct J_curr then transpose
+        # Construct J_curr^T directly:
+        # J_curr^T[:, :n_states] = dR_diff^T  (n × n_states)
+        # J_curr^T[:, n_states:] = dg_dy^T    (n × n_alg)
+        
+        J_curr_T = jnp.zeros((n, n), dtype=jnp.float64)
+        
+        # First block: transpose of dR_diff = (α₀/h)I - df_dy
         dR_diff = -df_dy  # (n_states, n)
         dR_diff = dR_diff.at[:, :n_states].add(bdf_coeff * self.I_states)
+        J_curr_T = J_curr_T.at[:, :n_states].set(dR_diff.T)
+        
+        # Second block: transpose of dg_dy
+        J_curr_T = J_curr_T.at[:, n_states:].set(dg_dy.T)
 
-        J_curr = jnp.vstack([dR_diff, dg_dy])  # (n, n)
-
-        return J_curr.T
+        return J_curr_T
 
     def _compute_bdf_adjoint_matrixfree_parallel(
         self,
@@ -304,8 +315,9 @@ class DAEOptimizerParallelV2TrueBDFOptimized(DAEOptimizer):
         v_base = vmap(lu_solve)((lu_factors, lu_pivots), dL_dy_adjoint)
 
         # Build augmented v: v_aug[k] = [v[k]; 0; 0; ...; 0]
-        v_aug_all = jnp.zeros((N, q * n), dtype=jnp.float64)
-        v_aug_all = v_aug_all.at[:, :n].set(v_base)
+        # Use native (N, q, n) shape to avoid reshaping overhead
+        v_aug_all = jnp.zeros((N, q, n), dtype=jnp.float64)
+        v_aug_all = v_aug_all.at[:, 0, :].set(v_base)
 
         # Compute M_0j blocks for all steps
         def compute_all_coupling_blocks_k(k_idx):
@@ -386,8 +398,9 @@ class DAEOptimizerParallelV2TrueBDFOptimized(DAEOptimizer):
 
             # Compute v_base using factorization
             v_base = lu_solve((lu_k, piv_k), dL_dy_k)
-            v_aug = jnp.zeros(q * n, dtype=jnp.float64)
-            v_aug = v_aug.at[:n].set(v_base)
+            # Use native (q, n) shape to avoid reshaping overhead
+            v_aug = jnp.zeros((q, n), dtype=jnp.float64)
+            v_aug = v_aug.at[0, :].set(v_base)
 
             # Build M_0j blocks (COMPRESSED)
             n_states = self.jac.n_states
@@ -429,7 +442,7 @@ class DAEOptimizerParallelV2TrueBDFOptimized(DAEOptimizer):
             M0_k, v_k = compute_step_matrices(k, t_kp1[k], y_kp1[k], h_all[k], dL_dy_adjoint[k])
             # Apply companion matvec (no dense M_aug!)
             lambda_curr_aug = self._apply_companion_matvec(M0_k, lambda_next_aug, v_k)
-            lambda_phys = lambda_curr_aug[:n]
+            lambda_phys = lambda_curr_aug[0]  # First block is physical state
             return lambda_curr_aug, lambda_phys
 
         # Scan range: N-2, N-3, ..., 0
@@ -438,14 +451,14 @@ class DAEOptimizerParallelV2TrueBDFOptimized(DAEOptimizer):
         if N > 1:
             final_carry, stacked_lambdas = lax.scan(scan_fun, lambda_aug_last, scan_indices)
             lambdas_rev = stacked_lambdas[::-1]
-            lambda_last_phys = lambda_aug_last[:n]
-            lambda_all = jnp.vstack([lambdas_rev, lambda_last_phys[None, :]])
+            lambda_last_phys = lambda_aug_last[0]  # First block is physical state
+            lambda_all = jnp.vstack([lambdas_rev, lambda_last_phys.reshape(1, -1)])
         else:
-            lambda_all = lambda_aug_last[:n][None, :]
+            lambda_all = lambda_aug_last[0].reshape(1, -1)  # First block is physical state
 
         return lambda_all
 
-    def _apply_companion_matvec(self, M0_blocks, lambda_next_aug_flat, v_aug_flat):
+    def _apply_companion_matvec(self, M0_blocks, lambda_next_aug, v_aug):
         """
         Apply companion operator via matrix-vector product (NO dense M_aug formation).
 
@@ -453,29 +466,29 @@ class DAEOptimizerParallelV2TrueBDFOptimized(DAEOptimizer):
 
         Args:
             M0_blocks: Top-row blocks, shape (q, n, n) or (q, n, n_states)
-            lambda_next_aug_flat: Flattened augmented adjoint, shape (q*n,)
-            v_aug_flat: Flattened RHS vector, shape (q*n,)
+            lambda_next_aug: Augmented adjoint, shape (q, n)
+            v_aug: RHS vector, shape (q, n)
 
         Returns:
-            lambda_curr_aug_flat: Result, shape (q*n,)
+            lambda_curr_aug: Result, shape (q, n)
         """
         q = M0_blocks.shape[0]
-        n = lambda_next_aug_flat.shape[0] // q
+        n = lambda_next_aug.shape[1]
         n_rhs = M0_blocks.shape[2]  # Either n or n_states
 
-        # Reshape to (q, n)
-        lambda_next = lambda_next_aug_flat.reshape(q, n)
-        v_aug = v_aug_flat.reshape(q, n)
+        # Already in (q, n) shape - no reshaping needed!
+        lambda_next = lambda_next_aug
 
         # Top row: sum_j M_0j @ lambda_next[j, :n_rhs]
+        # Use einsum for better XLA fusion (avoids vmap + sum overhead)
         if n_rhs == n:
             # Full blocks: (q, n, n) @ (q, n)
-            top_contributions = vmap(lambda M, lam: M @ lam)(M0_blocks, lambda_next)
+            # einsum: 'jnm,jn->m' means sum_j (M0_blocks[j,n,m] * lambda_next[j,n])
+            top_row = jnp.einsum('jnm,jn->m', M0_blocks, lambda_next) + v_aug[0]
         else:
             # Compressed blocks: (q, n, n_states) @ (q, n_states)
-            top_contributions = vmap(lambda M, lam: M @ lam[:n_rhs])(M0_blocks, lambda_next)
-
-        top_row = jnp.sum(top_contributions, axis=0) + v_aug[0]  # (n,)
+            # einsum: 'jmk,jk->m' means sum_j (M0_blocks[j,m,k] * lambda_next[j,k])
+            top_row = jnp.einsum('jmk,jk->m', M0_blocks, lambda_next[:, :n_rhs]) + v_aug[0]
 
         # Build result without concatenate (use preallocated array + .at)
         lambda_curr = jnp.zeros((q, n), dtype=jnp.float64)
@@ -486,7 +499,8 @@ class DAEOptimizerParallelV2TrueBDFOptimized(DAEOptimizer):
             shifted = lambda_next[:-1] + v_aug[1:]  # (q-1, n)
             lambda_curr = lambda_curr.at[1:].set(shifted)
 
-        return lambda_curr.flatten()
+        # Return in native (q, n) shape - no flattening!
+        return lambda_curr
 
     def _build_companion_matrix_efficient(self, M0_blocks):
         """
@@ -592,18 +606,21 @@ class DAEOptimizerParallelV2TrueBDFOptimized(DAEOptimizer):
                 )
 
                 # Solve using FAST parallel scan (O(log N))
-                y0 = v_all[-1]
-                vecs = v_all[:-1][::-1]
-                mats = M_blocks[::-1]
+                # v_all is now (N, q, n) - flatten for matmul_recursive compatibility
+                q = self.bdf_order
+                n = self.jac.n_total
+                y0 = v_all[-1].flatten()  # (qn,)
+                vecs = v_all[:-1][::-1].reshape(-1, q * n)  # (N-1, qn)
+                mats = M_blocks[::-1]  # (N-1, qn, qn)
 
                 if N == 1:
-                    lambda_aug = v_all
+                    lambda_aug = v_all  # (1, q, n)
                 else:
-                    y_rev = matmul_recursive(mats, vecs, y0)
-                    lambda_aug = y_rev[::-1]
+                    y_rev = matmul_recursive(mats, vecs, y0)  # (N, qn)
+                    lambda_aug = y_rev[::-1].reshape(N, q, n)  # (N, q, n)
 
                 n_phys = self.jac.n_total
-                lambda_adjoint = lambda_aug[:, :n_phys]
+                lambda_adjoint = lambda_aug[:, 0, :n_phys]  # Extract first block's physical states
             else:
                 lambda_adjoint = self._compute_bdf_adjoint_matrixfree_sequential(
                     t_k, t_kp1, y_k, y_kp1, p_opt_vals_jax, dL_dy_adjoint

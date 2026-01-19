@@ -1,0 +1,68 @@
+\section{Augmented Lagrangian with Multiplier Tracking}
+
+\begin{algorithm}[htp!]
+\caption{Augmented Lagrangian Adjoint Tracking (Option C)}
+\label{alg:optionC-al}
+\begin{algorithmic}[1]
+\Require Initial parameter $\theta^{0}$, initial multiplier $\eta^{0}$, penalty parameter $\mu>0$, step sizes $\alpha_w,\alpha_\theta>0$, tolerances $\varepsilon_{\text{feas}},\varepsilon_{\text{adj}}$
+\State $k \leftarrow 0$
+\While{not converged}
+    \State \textbf{(Optional) Reset / feasibility enforcement:}
+    \State \quad Compute $w^{k} \approx w_h(\theta^{k})$ such that
+    \[
+        \|R_h(w^{k},\theta^{k})\| \le \varepsilon_{\text{feas}}
+    \]
+    \State \textbf{Primal step (minimize augmented Lagrangian in $w$):}
+    \State \quad Define
+    \[
+        \mathcal{L}_\mu(w,\theta,\eta)
+        :=
+        \Phi(w,\theta)
+        + \eta^\top R_h(w,\theta)
+        + \frac{\mu}{2}\|R_h(w,\theta)\|^2
+    \]
+    \State \quad Update $w$ using (one or more) gradient-based steps:
+    \[
+        w^{k+1/2} = w^{k} - \alpha_w \nabla_w \mathcal{L}_\mu(w^{k},\theta^{k},\eta^{k})
+    \]
+    \State \textbf{Multiplier update (dual ascent):}
+    \State \quad Compute the new residual $r^{k+1/2} := R_h(w^{k+1/2},\theta^{k})$
+    \State \quad Update the multiplier:
+    \[
+        \eta^{k+1/2} = \eta^{k} + \mu\, r^{k+1/2}
+    \]
+    \State \textbf{(Optional) Krylov refinement of the multiplier:}
+    \State \quad Form the linear operator
+    \[
+        A_{k+1/2} := R_{w,h}(w^{k+1/2},\theta^{k})
+    \]
+    \State \quad Approximately solve (warm-start from $\eta^{k+1/2}$)
+    \[
+        A_{k+1/2}^\top \lambda = \nabla_w \Phi(w^{k+1/2},\theta^{k})^\top
+    \]
+    using a few Krylov iterations until
+    \[
+        \|\nabla_w \Phi(w^{k+1/2},\theta^{k})^\top - A_{k+1/2}^\top \lambda\| \le \varepsilon_{\text{adj}}
+    \]
+    \State \quad Set $\eta^{k+1} \leftarrow \lambda$
+    \State \textbf{Parameter gradient and update:}
+    \State \quad Compute the augmented Lagrangian $\theta$-gradient:
+    \[
+        g^{k}
+        =
+        \nabla_\theta \mathcal{L}_\mu(w^{k+1/2},\theta^{k},\eta^{k+1})
+        =
+        \Phi_\theta(w^{k+1/2},\theta^{k})
+        + R_{\theta,h}(w^{k+1/2},\theta^{k})^\top \eta^{k+1}
+        + \mu R_{\theta,h}(w^{k+1/2},\theta^{k})^\top r^{k+1/2}
+    \]
+    \State \quad Update parameters:
+    \[
+        \theta^{k+1} = \theta^{k} - \alpha_\theta\, g^{k}
+    \]
+    \State \textbf{Finalize primal iterate:}
+    \State \quad Set $w^{k} \leftarrow w^{k+1/2}$
+    \State $k \leftarrow k+1$
+\EndWhile
+\end{algorithmic}
+\end{algorithm}

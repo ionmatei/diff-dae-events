@@ -41,13 +41,15 @@ class DAESolver:
     The DAE is converted to an ODE by solving algebraic equations at each timestep.
     """
 
-    def __init__(self, dae_data: dict):
+    def __init__(self, dae_data: dict, verbose: bool = True):
         """
         Load DAE from JSON specification.
 
         Args:
             dae_data: Dictionary containing DAE specification
+            verbose: Whether to print loading/compilation messages
         """
+        self.verbose = verbose
         form = dae_data
 
         # Extract variables
@@ -75,13 +77,14 @@ class DAESolver:
         self.z0 = np.zeros(len(self.alg_vars))
         self.p = np.array([p['value'] for p in self.parameters])
 
-        print(f"DAE loaded")
-        print(f"  Differential states: {len(self.states)}")
-        print(f"  Algebraic variables: {len(self.alg_vars)}")
-        print(f"  Parameters: {len(self.parameters)}")
-        print(f"  Outputs: {len(self.outputs)}")
-        print(f"  f equations: {len(self.f_eqs)}")
-        print(f"  g equations: {len(self.g_eqs)}")
+        if self.verbose:
+            print(f"DAE loaded")
+            print(f"  Differential states: {len(self.states)}")
+            print(f"  Algebraic variables: {len(self.alg_vars)}")
+            print(f"  Parameters: {len(self.parameters)}")
+            print(f"  Outputs: {len(self.outputs)}")
+            print(f"  f equations: {len(self.f_eqs)}")
+            print(f"  g equations: {len(self.g_eqs)}")
 
         # Compile equations into Python functions
         self._compile_equations()
@@ -99,7 +102,8 @@ class DAESolver:
         Compile equation strings into executable Python functions.
         This uses eval() but in a controlled namespace.
         """
-        print("\nCompiling equations...")
+        if self.verbose:
+            print("\nCompiling equations...")
 
         # Create namespace with math functions
         self.namespace = {
@@ -120,7 +124,8 @@ class DAESolver:
             'der': lambda x: x,  # Placeholder, handled separately
         }
 
-        print("Available math functions:", list(self.namespace.keys()))
+        if self.verbose:
+            print("Available math functions:", list(self.namespace.keys()))
 
         # Compile f equations (derivatives)
         self.f_funcs = []
@@ -164,7 +169,8 @@ class DAESolver:
                 else:
                     self.h_funcs.append(eq)
 
-        print("Equations compiled successfully!")
+        if self.verbose:
+            print("Equations compiled successfully!")
 
     def _create_eval_namespace(self, t: float, x: np.ndarray, z: np.ndarray) -> Dict:
         """Create namespace for equation evaluation."""
@@ -308,7 +314,8 @@ class DAESolver:
         # Always create h vmap since h now returns x (identity) when not defined
         self._h_vmapped = vmap(eval_h_single, in_axes=(0, 0))
 
-        print("JAX vmap functions compiled successfully!")
+        if self.verbose:
+            print("JAX vmap functions compiled successfully!")
 
     def _create_jax_eval_namespace(self, t, x, z):
         """Create namespace for JAX equation evaluation."""
