@@ -56,13 +56,14 @@ def _init():
     parser.add_argument(
         '--config', '-c',
         type=str,
-        default='config/config_cauer.yaml',
+        # default='config/config_cauer.yaml',
+        default='config/config_stiff.yaml',
         help='Path to configuration YAML file'
     )
     parser.add_argument(
         '--method', '-m',
         type=str,
-        default='bdf3',
+        default='backward_euler',
         choices=['backward_euler', 'trapezoidal', 'bdf2', 'bdf3', 'bdf4', 'bdf5', 'bdf6'],
         help='Time discretization method'
     )

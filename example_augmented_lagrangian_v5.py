@@ -58,7 +58,7 @@ _config, _device = _init()
 from src.discrete_adjoint.dae_solver import DAESolver
 # Import from the V5 file. Note: The class name might still be V4 in the file, 
 # but we import it from the v5 module.
-from src.augmented_lagrangian.dae_optimizer_augmented_lagrangian_v5 import DAEOptimizerAugmentedLagrangianV4 as DAEOptimizerV5
+from src.augmented_lagrangian.dae_optimizer_augmented_lagrangian_v5 import DAEOptimizerAugmentedLagrangianV5 as DAEOptimizerV5
 
 def example_augmented_lagrangian_v5(config: dict):
     

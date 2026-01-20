@@ -1,0 +1,122 @@
+{
+  "states": [
+    {
+      "name": "x1",
+      "type": "float",
+      "start": -3.0,
+      "orig_name": "U1 - U2 (Voltage across C1)"
+    },
+    {
+      "name": "x2",
+      "type": "float",
+      "start": 3.0,
+      "orig_name": "U3 (Voltage across C2)"
+    },
+    {
+      "name": "x3",
+      "type": "float",
+      "start": 6.0,
+      "orig_name": "U4 - U5 (Voltage across C3)"
+    }
+  ],
+  "inputs": null,
+  "alg_vars": [
+    {
+      "name": "z1",
+      "type": "float",
+      "start": 3.0,
+      "orig_name": "U2"
+    },
+    {
+      "name": "z2",
+      "type": "float",
+      "start": 0.0,
+      "orig_name": "U5"
+    }
+  ],
+  "outputs": null,
+  "parameters": [
+    {
+      "name": "Ub",
+      "type": "float",
+      "value": 6.0,
+      "orig_name": "Ub"
+    },
+    {
+      "name": "R0",
+      "type": "float",
+      "value": 1000.0,
+      "orig_name": "R0"
+    },
+    {
+      "name": "R1",
+      "type": "float",
+      "value": 9000.0,
+      "orig_name": "R1"
+    },
+    {
+      "name": "R2",
+      "type": "float",
+      "value": 9000.0,
+      "orig_name": "R2"
+    },
+    {
+      "name": "R3",
+      "type": "float",
+      "value": 9000.0,
+      "orig_name": "R3"
+    },
+    {
+      "name": "R4",
+      "type": "float",
+      "value": 9000.0,
+      "orig_name": "R4"
+    },
+    {
+      "name": "R5",
+      "type": "float",
+      "value": 9000.0,
+      "orig_name": "R5"
+    },
+    {
+      "name": "C1",
+      "type": "float",
+      "value": 1e-06,
+      "orig_name": "C1"
+    },
+    {
+      "name": "C2",
+      "type": "float",
+      "value": 2e-06,
+      "orig_name": "C2"
+    },
+    {
+      "name": "C3",
+      "type": "float",
+      "value": 3e-06,
+      "orig_name": "C3"
+    },
+    {
+      "name": "beta",
+      "type": "float",
+      "value": 1e-06,
+      "orig_name": "beta"
+    },
+    {
+      "name": "Uf",
+      "type": "float",
+      "value": 0.026,
+      "orig_name": "Uf"
+    }
+  ],
+  "f": [
+    "der(x1) = ( ((0.4 * sin(200.0 * 3.14159265359 * time)) - x1 - z1) / R0 ) / C1",
+    "der(x2) = ( (beta * (exp((z1 - x2) / Uf) - 1.0)) - (x2 / R3) ) / C2",
+    "der(x3) = ( ((Ub - x3 - z2) / R4) - (0.99 * beta * (exp((z1 - x2) / Uf) - 1.0)) ) / C3"
+  ],
+  "g": [
+    "0 = ( ((0.4 * sin(200.0 * 3.14159265359 * time)) - x1 - z1) / R0 ) + (Ub / R2) - (z1 * ( (1.0/R1) + (1.0/R2) )) - (0.01 * beta * (exp((z1 - x2) / Uf) - 1.0))",
+    "0 = ( (Ub - x3 - z2) / R4 ) - (0.99 * beta * (exp((z1 - x2) / Uf) - 1.0)) - (z2 / R5)"
+  ],
+  "h": null
+}

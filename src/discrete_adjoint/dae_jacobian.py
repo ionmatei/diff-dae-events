@@ -1497,7 +1497,8 @@ class DAEOptimizer:
     """
 
     def __init__(self, dae_data: dict, dae_solver=None, optimize_params: List[str] = None,
-                 loss_type: str = 'sum', method: str = 'trapezoidal'):
+                 loss_type: str = 'sum', method: str = 'trapezoidal',
+                 rtol: float = 1e-4, atol: float = 1e-4):
         """
         Initialize the DAE optimizer.
 
@@ -1511,12 +1512,16 @@ class DAEOptimizer:
                       'mean': loss = mean((y_pred - y_target)^2)
             method: Time discretization method. One of:
                     'backward_euler', 'trapezoidal' (default), 'bdf2' through 'bdf6'
+            rtol: Relative tolerance for DAE solver. Default is 1e-4.
+            atol: Absolute tolerance for DAE solver. Default is 1e-4.
         """
         from .dae_solver import DAESolver
         from .adjoint_solver import solve_adjoint_system_jit
 
         self.dae_data = dae_data
         self.method = method
+        self.rtol = rtol
+        self.atol = atol
         self.jac = DAEJacobian(dae_data, method=method)
 
         if dae_solver is None:
@@ -1822,7 +1827,7 @@ class DAEOptimizer:
         # Solve DAE
         t_span = (float(t_array[0]), float(t_array[-1]))
         ncp = len(t_array)
-        result = self.solver.solve(t_span=t_span, ncp=ncp, rtol=1e-4, atol=1e-4)
+        result = self.solver.solve(t_span=t_span, ncp=ncp, rtol=self.rtol, atol=self.atol)
 
         # Extract solution
         t_sol = result['t']
@@ -1981,7 +1986,7 @@ class DAEOptimizer:
         # Solve DAE
         t_span = (float(t_array[0]), float(t_array[-1]))
         ncp = len(t_array)
-        result = self.solver.solve(t_span=t_span, ncp=ncp, rtol=1e-4, atol=1e-4)
+        result = self.solver.solve(t_span=t_span, ncp=ncp, rtol=self.rtol, atol=self.atol)
 
         # Extract solution (numpy arrays from DAE solver)
         t_sol = result['t']

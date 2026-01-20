@@ -53,7 +53,8 @@ def _init():
     parser.add_argument(
         '--config', '-c',
         type=str,
-        default='config/config_cauer.yaml',
+        # default='config/config_cauer.yaml',
+        default='config/config_stiff.yaml',        
         help='Path to configuration YAML file'
     )
     parser.add_argument(
@@ -154,6 +155,7 @@ def example_optimized_true_bdf_adjoint(config: dict, method: str = None, use_seq
     y_ref = result_true['y']
 
     print(f"  Generated {len(t_ref)} time points")
+    print(f"  t_ref range: [{t_ref[0]}, {t_ref[-1]}]")
 
     # Step 2: Select parameters
     print("\n" + "=" * 80)
@@ -195,7 +197,9 @@ def example_optimized_true_bdf_adjoint(config: dict, method: str = None, use_seq
         dae_data_init,
         optimize_params=opt_params,
         method=method,
-        use_parallel_scan=not use_sequential
+        use_parallel_scan=not use_sequential,
+        rtol=rtol,
+        atol=atol
     )
 
     if opt_params:

@@ -1,25 +1,20 @@
 dae_solver:
-  atol: 0.0001
-  rtol: 0.0001
+  atol: 0.001
+  rtol: 0.001
   start_time: 0.0
-  stop_time: 150.0
-  ncp: 1000
-  dae_specification_file: dae_examples/dae_specification_smooth.json
+  stop_time: 0.02
+  ncp: 200
+  dae_specification_file: dae_examples/dae_specification_stiff.json
   
 optimizer:
   method: trapezoidal
-  step_size: 0.002
+  step_size: 100 # 50
   opt_params:
-    - C1_C
-    - C2_C
-    - C3_C
-    - C4_C
-    - C5_C
-    - L1_L
-    - L2_L
+    - R1
+    - R2
   loss_type: mean
-  max_iterations: 200
-  tol: 0.001
+  max_iterations: 500
+  tol: 0.0001
   max_iterations_krylov: 30
   tol_krylov: 0.0001
   print_every: 20

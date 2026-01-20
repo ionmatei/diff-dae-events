@@ -1,0 +1,127 @@
+    def solve(self,
+              t_span: Tuple[float, float],
+              ncp: int = 500,
+              rtol: float = 1e-6,
+              atol: float = 1e-8,
+              verbose: bool = False,
+              **kwargs) -> Dict:
+        """
+        Solve the DAE using SUNDIALS IDA.
+
+        Args:
+            t_span: (t0, tf) time interval
+            ncp: number of communication points (output points)
+            rtol: Relative tolerance
+            atol: Absolute tolerance
+            verbose: If True, print solver progress information
+            **kwargs: Additional arguments to IDA solver
+
+        Returns:
+            Dictionary with:
+                - t: time points
+                - x: differential states
+                - z: algebraic variables
+                - y: outputs (if h is defined)
+                - state_names: names of differential states
+                - alg_names: names of algebraic variables
+                - output_names: names of outputs
+        """
+        if verbose:
+            print(f"\nSolving DAE from t={t_span[0]} to t={t_span[1]} using SUNDIALS IDA")
+            print(f"  Output points: {ncp}")
+            print(f"  Tolerances: rtol={rtol}, atol={atol}")
+
+        # Combine initial conditions: y0 = [x0, z0]
+        y0 = np.concatenate([self.x0, self.z0])
+        n_states = len(self.state_names)
+        n_total = len(y0)
+
+        # Check initial algebraic constraints
+        if verbose:
+            print(f"\nChecking initial conditions...")
+            print(f"  Initial differential states (x0): {self.x0}")
+            print(f"  Initial algebraic variables (z0): {self.z0}")
+
+        g0 = self.eval_g(t_span[0], self.x0, self.z0)
+        if verbose:
+            print(f"  Initial algebraic constraint residuals g(t0, x0, z0):")
+            for i, (name, val) in enumerate(zip(self.alg_names, g0)):
+                print(f"    {name}: {val:.6e}")
+
+            if np.max(np.abs(g0)) > 1e-6:
+                print(f"  WARNING: Initial algebraic constraints not satisfied (max residual: {np.max(np.abs(g0)):.6e})")
+                print(f"  IDA will try to compute consistent initial conditions...")
+
+        # Initial derivatives: ydot0 = [f(t0, x0, z0), 0]
+        # Differential variables have non-zero derivatives
+        # Algebraic variables have zero derivatives (by definition)
+        f0 = self.eval_f(t_span[0], self.x0, self.z0)
+        ydot0 = np.concatenate([f0, np.zeros(len(self.z0))])
+
+        if verbose:
+            print(f"  Initial derivatives f(t0, x0, z0): {f0}")
+
+        # Create IDA solver
+        solver = dae(
+            'ida',
+            self.residual_ida,
+            rtol=rtol,
+            atol=atol,
+            **kwargs
+        )
+
+        # Specify which variables are algebraic (id array)
+        # id[i] = 1.0 for differential variables
+        # id[i] = 0.0 for algebraic variables
+        algvar_id = np.concatenate([
+            np.ones(n_states),      # differential states
+            np.zeros(n_total - n_states)  # algebraic variables
+        ])
+        solver.set_options(algebraic_vars_idx=algvar_id)
+        # solver.set_options(compute_initcond='yp0')
+
+        # Create time span
+        tspan = np.linspace(t_span[0], t_span[1], ncp)
+
+        # Solve
+        if verbose:
+            print("Starting integration...")
+        sol = solver.solve(tspan, y0, ydot0)
+
+        if not sol.flag and verbose:
+            print(f"Warning: Solver flag indicates potential issues")
+
+        if verbose:
+            print(f"Integration completed successfully!")
+            print(f"  Time steps: {len(sol.values.t)}")
+
+        # Extract results
+        t = sol.values.t
+        y_all = sol.values.y
+
+        # Split into differential and algebraic variables
+        x = y_all[:, :n_states].T
+        z = y_all[:, n_states:].T
+
+        # Compute outputs - if h is defined, use it; otherwise returns x (identity)
+        # Determine output size
+        if self.h_funcs:
+            n_outputs = len(self.h_funcs)
+        else:
+            n_outputs = n_states
+
+        y_out = np.zeros((n_outputs, len(t)))
+        for i in range(len(t)):
+            y_out[:, i] = self.eval_h(t[i], x[:, i], z[:, i])
+
+        result = {
+            't': t,
+            'x': x,
+            'z': z,
+            'y': y_out,
+            'state_names': self.state_names,
+            'alg_names': self.alg_names,
+            'output_names': self.output_names if self.output_names else self.state_names,
+        }
+
+        return result
