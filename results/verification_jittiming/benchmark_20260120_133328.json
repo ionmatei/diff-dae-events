@@ -1,0 +1,71 @@
+{
+  "timestamp": "2026-01-20T13:33:10.076533",
+  "config_path": "config/config_cauer.yaml",
+  "config_settings": {
+    "algorithm": {
+      "type": "SGD",
+      "params": {
+        "step_size": 0.003,
+        "beta1": 0.9,
+        "beta2": 0.999,
+        "epsilon": 1e-08
+      }
+    },
+    "discretization_method": "bdf6",
+    "max_iterations": 50,
+    "tol": 0.001
+  },
+  "devices": [
+    "gpu"
+  ],
+  "ncp_values": [
+    2000
+  ],
+  "methods": [
+    "bdf6"
+  ],
+  "n_runs": 1,
+  "benchmarks": [
+    {
+      "method": "DEER",
+      "discretization": "bdf6",
+      "total_time": 6.1428773403167725,
+      "converged": false,
+      "n_iterations": 50,
+      "final_loss": 0.187446547193656,
+      "initial_loss": 3.4847760075904075,
+      "final_grad_norm": 1.0716603882236149,
+      "rel_error": 0.0004987024396818446,
+      "avg_time_per_iter": 0.015050216596953723,
+      "std_time_per_iter": 0.018874778292495543,
+      "min_time_per_iter": 0.008452892303466797,
+      "max_time_per_iter": 0.12224698066711426,
+      "median_time_per_iter": 0.01138162612915039,
+      "ncp": 2000,
+      "device": "gpu",
+      "run": 0,
+      "success": true
+    },
+    {
+      "method": "discrete_adjoint",
+      "discretization": "bdf6",
+      "scan_mode": "auto",
+      "total_time": 6.7897491455078125,
+      "converged": false,
+      "n_iterations": 50,
+      "final_loss": 0.18064484514858875,
+      "initial_loss": 3.9790293874659746,
+      "final_grad_norm": 1.1462788828111545,
+      "rel_error": 0.0004823268328230703,
+      "avg_time_per_iter": 0.09798154052422971,
+      "std_time_per_iter": 0.031864124436233425,
+      "min_time_per_iter": 0.0747838020324707,
+      "max_time_per_iter": 0.18921160697937012,
+      "median_time_per_iter": 0.08848023414611816,
+      "ncp": 2000,
+      "device": "gpu",
+      "run": 0,
+      "success": true
+    }
+  ]
+}

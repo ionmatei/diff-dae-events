@@ -1588,6 +1588,15 @@ class DAEOptimizer:
             'params_all': [],
             'step_size': []
         }
+        
+        # Algorithm configuration (SGD or ADAM)
+        self.algorithm_type = None  # Will be set in optimize()
+        self.algorithm_params = None
+        
+        # Adam optimizer state (initialized when optimize() is called with Adam)
+        self.adam_m = None  # First moment estimate
+        self.adam_v = None  # Second moment estimate  
+        self.adam_t = 0     # Timestep counter
 
         print(f"DAE Optimizer initialized")
         print(f"  Method: {self.method}")
@@ -2039,6 +2048,46 @@ class DAEOptimizer:
 
         return p_opt_new, float(loss), grad_p_opt, timings
 
+    def _adam_update_step(self, p, grad, m, v, t, beta1, beta2, epsilon, step_size):
+        """
+        Adam optimizer update step.
+        
+        Args:
+            p: Current parameters
+            grad: Gradient
+            m: First moment estimate
+            v: Second moment estimate
+            t: Timestep
+            beta1: Exponential decay rate for first moment
+            beta2: Exponential decay rate for second moment
+            epsilon: Small constant for numerical stability
+            step_size: Learning rate
+            
+        Returns:
+            p_new: Updated parameters
+            m_new: Updated first moment
+            v_new: Updated second moment
+            t_new: Updated timestep
+        """
+        t_new = t + 1
+        
+        # Update biased first moment estimate
+        m_new = beta1 * m + (1 - beta1) * grad
+        
+        # Update biased second moment estimate
+        v_new = beta2 * v + (1 - beta2) * (grad ** 2)
+        
+        # Compute bias-corrected first moment estimate
+        m_hat = m_new / (1 - beta1 ** t_new)
+        
+        # Compute bias-corrected second moment estimate
+        v_hat = v_new / (1 - beta2 ** t_new)
+        
+        # Update parameters
+        p_new = p - step_size * m_hat / (jnp.sqrt(v_hat) + epsilon)
+        
+        return p_new, m_new, v_new, t_new
+
     def optimize(
         self,
         t_array: np.ndarray,
@@ -2048,7 +2097,9 @@ class DAEOptimizer:
         step_size: float = 0.01,
         tol: float = 1e-6,
         combined: bool = True,
-        verbose: bool = True
+        verbose: bool = True,
+        algorithm_config: Dict = None,
+        print_every: int = 10
     ) -> Dict:
         """
         Optimize DAE parameters to minimize loss.
@@ -2058,9 +2109,16 @@ class DAEOptimizer:
             y_target: target output trajectory
             p_init: initial parameter values (if None, uses current values)
             n_iterations: maximum number of iterations
-            step_size: gradient descent step size
+            step_size: gradient descent step size (deprecated, use algorithm_config)
             tol: convergence tolerance on gradient norm
+            combined: whether to use combined JIT optimization step
             verbose: whether to print progress
+            algorithm_config: Algorithm configuration dict with format:
+                {
+                    'type': 'SGD' or 'ADAM',
+                    'params': {'step_size': 0.01, 'beta1': 0.9, ...}
+                }
+                If None, defaults to SGD with given step_size
 
         Returns:
             Dictionary containing:
@@ -2069,12 +2127,32 @@ class DAEOptimizer:
                 - history: optimization history
                 - converged: whether optimization converged
         """
+        # Parse algorithm configuration
+        if algorithm_config is None:
+            # Default to SGD with provided step_size
+            self.algorithm_type = 'SGD'
+            self.algorithm_params = {'step_size': step_size}
+        else:
+            self.algorithm_type = algorithm_config.get('type', 'SGD').upper()
+            self.algorithm_params = algorithm_config.get('params', {})
+            # Override step_size from params if not explicitly provided
+            if 'step_size' not in self.algorithm_params:
+                self.algorithm_params['step_size'] = step_size
+        
+        # Extract algorithm parameters
+        algo_step_size = self.algorithm_params.get('step_size', step_size)
+        
         if verbose:
             print("\n" + "=" * 80)
             print("Starting DAE Parameter Optimization")
             print("=" * 80)
+            print(f"  Algorithm: {self.algorithm_type}")
             print(f"  Iterations: {n_iterations}")
-            print(f"  Step size: {step_size}")
+            print(f"  Step size: {algo_step_size}")
+            if self.algorithm_type == 'ADAM':
+                print(f"  Beta1: {self.algorithm_params.get('beta1', 0.9)}")
+                print(f"  Beta2: {self.algorithm_params.get('beta2', 0.999)}")
+                print(f"  Epsilon: {self.algorithm_params.get('epsilon', 1e-8)}")
             print(f"  Tolerance: {tol}")
             print(f"  Target trajectory points: {len(t_array)}")
 
@@ -2083,6 +2161,12 @@ class DAEOptimizer:
             p = jnp.array(p_init)
         else:
             p = self.p_current
+        
+        # Initialize Adam state if using Adam
+        if self.algorithm_type == 'ADAM':
+            self.adam_m = jnp.zeros_like(p)
+            self.adam_v = jnp.zeros_like(p)
+            self.adam_t = 0
 
         # Reset history
         self.history = {
@@ -2100,12 +2184,29 @@ class DAEOptimizer:
         for iteration in range(n_iterations):
             t_start = time.time()
 
-            # Perform optimization step
-            p_new, loss, grad_p, step_timings = self.optimization_step_combined(
-                t_array, y_target, p, step_size
-            ) if combined else self.optimization_step(
-                t_array, y_target, p, step_size
-            )
+            # Compute gradient (same for both algorithms)
+            if combined:
+                # Temporarily compute p_new using SGD just to get loss and gradient
+                _, loss, grad_p, step_timings = self.optimization_step_combined(
+                    t_array, y_target, p, algo_step_size
+                )
+            else:
+                _, loss, grad_p, step_timings = self.optimization_step(
+                    t_array, y_target, p, algo_step_size
+                )
+            
+            # Apply parameter update based on algorithm
+            if self.algorithm_type == 'ADAM':
+                beta1 = self.algorithm_params.get('beta1', 0.9)
+                beta2 = self.algorithm_params.get('beta2', 0.999)
+                epsilon = self.algorithm_params.get('epsilon', 1e-8)
+                
+                p_new, self.adam_m, self.adam_v, self.adam_t = self._adam_update_step(
+                    p, grad_p, self.adam_m, self.adam_v, self.adam_t,
+                    beta1, beta2, epsilon, algo_step_size
+                )
+            else:  # SGD
+                p_new = p - algo_step_size * jnp.array(grad_p)
 
             t_end = time.time()
             iter_time = t_end - t_start
@@ -2123,10 +2224,11 @@ class DAEOptimizer:
             self.history['gradient_norm'].append(grad_norm)
             self.history['params'].append(np.array(p))  # Only optimized params
             self.history['params_all'].append(p_all_current)  # All params
-            self.history['step_size'].append(step_size)
+            self.history['step_size'].append(algo_step_size)
             self.history['time_per_iter'].append(iter_time)
 
-            if verbose and (iteration % 1 == 0):  # Print every iteration for now if verbose
+            # Print progress based on print_every interval
+            if verbose and (iteration % print_every == 0 or iteration == n_iterations - 1):
                 print(f"\nIteration {iteration:4d} ({iter_time:.3f}s):")
                 print(f"  Loss:          {loss:.6e}")
                 print(f"  Gradient norm: {grad_norm:.6e}")
@@ -2139,14 +2241,6 @@ class DAEOptimizer:
                 
                 print(f"  Forward solve: {t_forward*1000:.1f}ms")
                 print(f"  Adjoint step:  {t_adjoint*1000:.1f}ms")
-            self.history['step_size'].append(step_size)
-            self.history['time_per_iter'].append(iter_time)
-
-            # Print progress
-            if verbose and (iteration % 10 == 0 or iteration == n_iterations - 1):
-                print(f"\nIteration {iteration:4d} ({iter_time:.3f}s):")
-                print(f"  Loss:          {loss:.6e}")
-                print(f"  Gradient norm: {grad_norm:.6e}")
 
             # Check convergence
             if grad_norm < tol:

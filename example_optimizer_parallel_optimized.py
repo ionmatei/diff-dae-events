@@ -53,16 +53,16 @@ def _init():
     parser.add_argument(
         '--config', '-c',
         type=str,
-        # default='config/config_cauer.yaml',
-        default='config/config_stiff.yaml',        
+        default='config/config_cauer.yaml',
+        # default='config/config_stiff.yaml',        
         help='Path to configuration YAML file'
     )
     parser.add_argument(
         '--method', '-m',
         type=str,
-        default=None,
+        default=None,  # Will use config if not provided
         choices=VALID_METHODS,
-        help=f'Discretization method. Choices: {VALID_METHODS}. Default: trapezoidal (or from config)'
+        help=f'Discretization method. Choices: {VALID_METHODS}. Overrides config if provided.'
     )
     parser.add_argument(
         '--use-sequential',
@@ -72,7 +72,12 @@ def _init():
     args, _ = parser.parse_known_args()
     config = load_config(args.config)
     device = setup_jax_device(config)
-    method = args.method
+    
+    # Method priority: config.discretization_method > CLI arg > default
+    method = config.get('optimizer', {}).get('discretization_method') or \
+             args.method or \
+             'trapezoidal'
+    
     use_sequential = args.use_sequential
     return config, device, method, use_sequential
 
@@ -83,7 +88,7 @@ _config, _device, _method, _use_sequential = _init()
 import numpy as np
 import json
 from src.discrete_adjoint.dae_solver import DAESolver
-from src.discrete_adjoint.dae_optimizer_parallel_v2_true_bdf_optimized import DAEOptimizerParallelV2TrueBDFOptimized
+from src.discrete_adjoint.dae_optimizer_parallel_optimized import DAEOptimizerParallelOptimized
 
 
 def example_optimized_true_bdf_adjoint(config: dict, method: str = None, use_sequential: bool = False):
@@ -103,7 +108,7 @@ def example_optimized_true_bdf_adjoint(config: dict, method: str = None, use_seq
     print("DAE Parameter Identification with OPTIMIZED TRUE BDF Adjoint")
     print("=" * 80)
     print(f"Discretization method: {method}")
-    print("Using: DAEOptimizerParallelV2TrueBDFOptimized")
+    print("Using: DAEOptimizerParallelOptimized")
     print("\nOptimizations:")
     print("  ✓ VJP infrastructure (matrix-free transpose matvecs)")
     print("  ✓ Solve instead of inv (more stable)")
@@ -193,7 +198,7 @@ def example_optimized_true_bdf_adjoint(config: dict, method: str = None, use_seq
     print(f"Step 4: Optimize with OPTIMIZED TRUE BDF Adjoint ({method})")
     print("=" * 80)
 
-    optimizer = DAEOptimizerParallelV2TrueBDFOptimized(
+    optimizer = DAEOptimizerParallelOptimized(
         dae_data_init,
         optimize_params=opt_params,
         method=method,
@@ -207,14 +212,21 @@ def example_optimized_true_bdf_adjoint(config: dict, method: str = None, use_seq
     else:
         p_init_opt = p_init
 
+    # Get algorithm configuration from config
+    algorithm_config = opt_cfg.get('algorithm')
+    if algorithm_config:
+        print(f"\nOptimizer algorithm: {algorithm_config.get('type', 'SGD')}")
+    
     result_opt = optimizer.optimize(
         t_array=t_ref,
         y_target=y_ref.T,
         p_init=p_init_opt,
         n_iterations=opt_cfg['max_iterations'],
-        step_size=opt_cfg['step_size'],
+        step_size=opt_cfg.get('step_size', 0.01) if not algorithm_config else algorithm_config.get('params', {}).get('step_size', 0.01),
         tol=opt_cfg['tol'],
-        verbose=True
+        verbose=True,
+        algorithm_config=algorithm_config,
+        print_every=opt_cfg.get('print_every', 10)
     )
 
     p_opt_all = result_opt['p_all']

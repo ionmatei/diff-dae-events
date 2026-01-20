@@ -32,6 +32,7 @@ BDF coefficients (for constant step size):
 - BDF6: (147/60)*y_n - 6*y_{n-1} + (15/2)*y_{n-2} - (20/3)*y_{n-3} + (15/4)*y_{n-4} - (6/5)*y_{n-5} + (1/6)*y_{n-6} = h*f_n
 """
 
+import ast
 import jax
 import jax.numpy as jnp
 from jax import jit, value_and_grad, vmap
@@ -49,6 +50,169 @@ from deer.utils import Result
 
 # Enable float64
 jax.config.update("jax_enable_x64", True)
+
+
+# =============================================================================
+# AST-based Expression Compiler for JAX-traceable functions
+# =============================================================================
+
+# Allowed JAX math functions mapping
+_JAX_MATH_FUNCS = {
+    'exp': 'jnp.exp', 'log': 'jnp.log', 'log10': 'jnp.log10',
+    'sqrt': 'jnp.sqrt', 'abs': 'jnp.abs',
+    'sin': 'jnp.sin', 'cos': 'jnp.cos', 'tan': 'jnp.tan',
+    'asin': 'jnp.arcsin', 'acos': 'jnp.arccos', 'atan': 'jnp.arctan',
+    'sinh': 'jnp.sinh', 'cosh': 'jnp.cosh', 'tanh': 'jnp.tanh',
+    'arcsin': 'jnp.arcsin', 'arccos': 'jnp.arccos', 'arctan': 'jnp.arctan',
+    'pow': 'jnp.power', 'sign': 'jnp.sign', 'floor': 'jnp.floor',
+    'ceil': 'jnp.ceil', 'min': 'jnp.minimum', 'max': 'jnp.maximum',
+}
+
+
+class _ExpressionTransformer(ast.NodeTransformer):
+    """
+    AST transformer that converts expression strings into JAX-compatible code.
+
+    Transforms variable names to array indexing:
+        x -> x_arr[idx]
+        z -> z_arr[idx]
+        param -> p_arr[idx]
+        t/time -> t
+
+    Transforms function calls to JAX equivalents:
+        sin(x) -> jnp.sin(x)
+        exp(x) -> jnp.exp(x)
+    """
+
+    def __init__(self, state_names: List[str], alg_var_names: List[str],
+                 param_names: List[str]):
+        self.state_idx = {name: i for i, name in enumerate(state_names)}
+        self.alg_idx = {name: i for i, name in enumerate(alg_var_names)}
+        self.param_idx = {name: i for i, name in enumerate(param_names)}
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        """Transform variable names to array indexing."""
+        name = node.id
+
+        # Time variable
+        if name in ('t', 'time'):
+            return ast.Name(id='t', ctx=ast.Load())
+
+        # State variable: x -> x_arr[idx]
+        if name in self.state_idx:
+            return ast.Subscript(
+                value=ast.Name(id='x', ctx=ast.Load()),
+                slice=ast.Constant(value=self.state_idx[name]),
+                ctx=node.ctx
+            )
+
+        # Algebraic variable: z -> z_arr[idx]
+        if name in self.alg_idx:
+            return ast.Subscript(
+                value=ast.Name(id='z', ctx=ast.Load()),
+                slice=ast.Constant(value=self.alg_idx[name]),
+                ctx=node.ctx
+            )
+
+        # Parameter: p -> p_arr[idx]
+        if name in self.param_idx:
+            return ast.Subscript(
+                value=ast.Name(id='p', ctx=ast.Load()),
+                slice=ast.Constant(value=self.param_idx[name]),
+                ctx=node.ctx
+            )
+
+        # Unknown name - keep as is (might be a constant like pi)
+        return node
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        """Transform function calls to JAX equivalents."""
+        # First transform arguments
+        node = self.generic_visit(node)
+
+        # Check if it's a known math function
+        if isinstance(node.func, ast.Name) and node.func.id in _JAX_MATH_FUNCS:
+            jax_func = _JAX_MATH_FUNCS[node.func.id]
+            # Parse the JAX function reference (e.g., 'jnp.sin' -> Attribute)
+            parts = jax_func.split('.')
+            func_node = ast.Name(id=parts[0], ctx=ast.Load())
+            for part in parts[1:]:
+                func_node = ast.Attribute(value=func_node, attr=part, ctx=ast.Load())
+            node.func = func_node
+
+        return node
+
+
+def _transform_expr_to_jax(expr_str: str, state_names: List[str],
+                           alg_var_names: List[str], param_names: List[str]) -> str:
+    """
+    Transform an expression string into JAX-compatible Python code string.
+
+    Returns the transformed expression as a string (not a function).
+    """
+    # Preprocess: replace ^ with ** and 'time' with 't'
+    expr_str = expr_str.replace('^', '**')
+    expr_str = re.sub(r'\btime\b', 't', expr_str)
+
+    # Parse into AST
+    try:
+        tree = ast.parse(expr_str, mode='eval')
+    except SyntaxError as e:
+        raise ValueError(f"Invalid expression syntax: {expr_str}") from e
+
+    # Transform AST
+    transformer = _ExpressionTransformer(state_names, alg_var_names, param_names)
+    tree = transformer.visit(tree)
+    ast.fix_missing_locations(tree)
+
+    # Convert back to source code
+    return ast.unparse(tree)
+
+
+def compile_expression(expr_str: str, state_names: List[str],
+                       alg_var_names: List[str], param_names: List[str]) -> Callable:
+    """
+    Compile an expression string into a JAX-traceable function.
+
+    Uses exec to create a real Python function, avoiding eval() overhead at runtime.
+    """
+    transformed = _transform_expr_to_jax(expr_str, state_names, alg_var_names, param_names)
+
+    # Create a real function using exec (no eval overhead at runtime)
+    func_code = f"def _expr_func(t, x, z, p):\n    return {transformed}"
+    local_ns = {}
+    exec(func_code, {'jnp': jnp}, local_ns)
+
+    return local_ns['_expr_func']
+
+
+def compile_expression_vectorized(expr_strs: List[str], state_names: List[str],
+                                   alg_var_names: List[str], param_names: List[str]) -> Callable:
+    """
+    Compile multiple expressions into a single JAX-traceable function returning a vector.
+
+    Creates a single fused function to avoid function call overhead.
+    """
+    if not expr_strs:
+        def empty_func(t, x, z, p):
+            return jnp.zeros(0, dtype=jnp.float64)
+        return empty_func
+
+    # Transform all expressions
+    transformed_exprs = [
+        _transform_expr_to_jax(expr, state_names, alg_var_names, param_names)
+        for expr in expr_strs
+    ]
+
+    # Build a single fused function that computes all expressions at once
+    # This avoids function call overhead and list comprehension overhead
+    expr_list = ', '.join(transformed_exprs)
+    func_code = f"def _combined_func(t, x, z, p):\n    return jnp.array([{expr_list}], dtype=jnp.float64)"
+
+    local_ns = {}
+    exec(func_code, {'jnp': jnp}, local_ns)
+
+    return local_ns['_combined_func']
 
 
 # BDF coefficients: coefficients for [y_n, y_{n-1}, y_{n-2}, ...] and divisor for dt
@@ -148,10 +312,10 @@ class DAEOptimizerDEERMethods:
         self.n_params_opt = len(self.optimize_indices)
         self.optimize_indices_jax = jnp.array(self.optimize_indices, dtype=jnp.int32)
 
-        # Parse equations
-        self.f_eqs = self._parse_f_equations()
-        self.g_eqs = self._parse_g_equations()
-        self.h_eqs = self._parse_h_equations()
+        # Parse and compile equations into JAX-traceable functions
+        self.f_eqs, self._eval_f = self._parse_f_equations()
+        self.g_eqs, self._eval_g = self._parse_g_equations()
+        self.h_eqs, self._eval_h = self._parse_h_equations()
 
         self.n_outputs = len(self.h_eqs) if self.h_eqs else self.n_states
 
@@ -163,6 +327,15 @@ class DAEOptimizerDEERMethods:
             'loss': [], 'gradient_norm': [], 'params': [],
             'params_all': [], 'step_size': [], 'time_per_iter': []
         }
+        
+        # Algorithm configuration (SGD or ADAM)
+        self.algorithm_type = None
+        self.algorithm_params = None
+        
+        # Adam state
+        self.adam_m = None
+        self.adam_v = None
+        self.adam_t = 0
 
         print(f"\nDAEOptimizerDEERMethods initialized:")
         print(f"  Method: {method}")
@@ -170,95 +343,127 @@ class DAEOptimizerDEERMethods:
         print(f"  Parameters to optimize: {self.n_params_opt}")
         print(f"  States: {self.n_states}, Algebraic: {self.n_alg}")
 
-    def _parse_f_equations(self):
+    def _parse_f_equations(self) -> Tuple[List[Tuple[str, str]], Callable]:
+        """
+        Parse f equations and compile into a single JAX-traceable function.
+
+        Returns:
+            Tuple of (equations list for reference, compiled eval_f function)
+        """
         equations = []
+        expr_strs = []
+        state_indices = []
+
         for eq_str in self.dae_data.get('f', []) or []:
             match = re.match(r'der\((\w+)\)\s*=\s*(.+)', eq_str.strip())
             if match:
-                equations.append((match.group(1), match.group(2).strip()))
-        return equations
+                state_name = match.group(1)
+                expr = match.group(2).strip()
+                equations.append((state_name, expr))
+                expr_strs.append(expr)
+                state_indices.append(self.state_names.index(state_name))
 
-    def _parse_g_equations(self):
+        # Compile all expressions into individual functions
+        compiled_exprs = [
+            compile_expression(expr, self.state_names, self.alg_var_names, self.param_names)
+            for expr in expr_strs
+        ]
+
+        # Pre-compute for closure
+        n_states = self.n_states
+
+        def eval_f(t, x, z, p):
+            """Compiled f evaluation - JAX traceable."""
+            dxdt = jnp.zeros(n_states, dtype=jnp.float64)
+            for idx, func in zip(state_indices, compiled_exprs):
+                dxdt = dxdt.at[idx].set(func(t, x, z, p))
+            return dxdt
+
+        return equations, eval_f
+
+    def _parse_g_equations(self) -> Tuple[List[str], Callable]:
+        """
+        Parse g equations and compile into a single JAX-traceable function.
+
+        Returns:
+            Tuple of (equations list for reference, compiled eval_g function)
+        """
         equations = []
+        expr_strs = []
+
         for eq_str in self.dae_data.get('g', []) or []:
             match = re.match(r'0(?:\.0*)?\s*=\s*(.+)', eq_str.strip())
             if match:
-                equations.append(match.group(1).strip())
-        return equations
+                expr = match.group(1).strip()
+                equations.append(expr)
+                expr_strs.append(expr)
 
-    def _parse_h_equations(self):
+        if not expr_strs:
+            def eval_g(t, x, z, p):
+                return jnp.zeros(0, dtype=jnp.float64)
+            return equations, eval_g
+
+        # Compile vectorized function
+        eval_g = compile_expression_vectorized(
+            expr_strs, self.state_names, self.alg_var_names, self.param_names
+        )
+
+        return equations, eval_g
+
+    def _parse_h_equations(self) -> Tuple[List[Tuple[str, str]], Callable]:
+        """
+        Parse h (output) equations and compile into a single JAX-traceable function.
+
+        Returns:
+            Tuple of (equations list for reference, compiled eval_h function)
+        """
         equations = []
+        expr_strs = []
+        n_states = self.n_states
+
         for eq_str in self.dae_data.get('h', []) or []:
-            if eq_str.strip() in self.state_names + self.alg_var_names:
-                equations.append(('output', eq_str.strip()))
+            stripped = eq_str.strip()
+            # Check if it's just a variable name
+            if stripped in self.state_names:
+                equations.append(('output', stripped))
+                expr_strs.append(stripped)
+            elif stripped in self.alg_var_names:
+                equations.append(('output', stripped))
+                expr_strs.append(stripped)
             else:
-                match = re.match(r'(\w+)\s*=\s*(.+)', eq_str.strip())
+                match = re.match(r'(\w+)\s*=\s*(.+)', stripped)
                 if match:
                     equations.append((match.group(1), match.group(2).strip()))
+                    expr_strs.append(match.group(2).strip())
                 else:
-                    equations.append(('output', eq_str.strip()))
-        return equations
+                    equations.append(('output', stripped))
+                    expr_strs.append(stripped)
+
+        if not expr_strs:
+            # Default: output all states
+            def eval_h(t, x, z, p):
+                return x
+            return equations, eval_h
+
+        # Compile vectorized function
+        eval_h = compile_expression_vectorized(
+            expr_strs, self.state_names, self.alg_var_names, self.param_names
+        )
+
+        return equations, eval_h
 
     def _build_jit_functions(self):
         """Build DEER-based simulation and optimization functions."""
 
-        state_names = self.state_names
-        alg_var_names = self.alg_var_names
-        param_names = self.param_names
-        f_eqs = self.f_eqs
-        g_eqs = self.g_eqs
-        h_eqs = self.h_eqs
+        # Use pre-compiled JAX-traceable functions from parsing stage
+        eval_f = self._eval_f
+        eval_g = self._eval_g
+        eval_h = self._eval_h
+
         n_states = self.n_states
         n_alg = self.n_alg
         n_total = self.n_total
         method = self.method
-
-        # Expression evaluation helpers
-        def build_namespace(t, x, z, p):
-            namespace = {'t': t}
-            for i, name in enumerate(state_names):
-                namespace[name] = x[i]
-            for i, name in enumerate(alg_var_names):
-                namespace[name] = z[i]
-            for i, name in enumerate(param_names):
-                namespace[name] = p[i]
-            return namespace
-
-        def eval_expr(expr, namespace):
-            expr = expr.replace('^', '**')
-            expr = re.sub(r'\btime\b', 't', expr)
-            math_funcs = {
-                'exp': jnp.exp, 'log': jnp.log, 'log10': jnp.log10,
-                'sqrt': jnp.sqrt, 'abs': jnp.abs,
-                'sin': jnp.sin, 'cos': jnp.cos, 'tan': jnp.tan,
-                'asin': jnp.arcsin, 'acos': jnp.arccos, 'atan': jnp.arctan,
-                'sinh': jnp.sinh, 'cosh': jnp.cosh, 'tanh': jnp.tanh,
-            }
-            return eval(expr, {'__builtins__': {}, 'jnp': jnp, **math_funcs}, namespace)
-
-        def eval_f(t, x, z, p):
-            namespace = build_namespace(t, x, z, p)
-            dxdt = jnp.zeros(n_states, dtype=jnp.float64)
-            for state_name, expr in f_eqs:
-                idx = state_names.index(state_name)
-                dxdt = dxdt.at[idx].set(eval_expr(expr, namespace))
-            return dxdt
-
-        def eval_g(t, x, z, p):
-            if not g_eqs:
-                return jnp.zeros(0, dtype=jnp.float64)
-            namespace = build_namespace(t, x, z, p)
-            return jnp.array([eval_expr(expr, namespace) for expr in g_eqs])
-
-        def eval_h(t, x, z, p):
-            if not h_eqs:
-                return x
-            namespace = build_namespace(t, x, z, p)
-            return jnp.array([eval_expr(expr, namespace) for _, expr in h_eqs])
-
-        self._eval_f = eval_f
-        self._eval_g = eval_g
-        self._eval_h = eval_h
 
         # ================================================================
         # DEER residual functions for different methods
@@ -352,6 +557,16 @@ class DAEOptimizerDEERMethods:
             # Generic BDF handler for orders 2-6 using COMPANION MATRIX construction
             # This transforms the q-step recurrence into a first-order block system
             # suitable for parallel associative scan via matmul_recursive
+            #
+            # OPTIMIZATION: Exploit block structure of augmented Jacobians.
+            # The augmented residual R_aug = [R_phys; R_hist] has Jacobian M0 = dR/dY_i:
+            #   M0 = [B0, B1, B2, ..., B_{q-1}]   (physics depends on all of Y_i)
+            #        [ I,  0,  0, ...,  0     ]   (shift constraints are identity)
+            #        [ 0,  I,  0, ...,  0     ]
+            #        ...
+            # Note: B1..B_{q-1} are generally nonzero (BDF derivative uses history).
+            # But the lower rows are pure identity shifts, enabling block elimination:
+            # solve bottom trivially (h_i = shift), substitute into top, solve ny×ny.
             bdf_order = int(method[3])
             coeffs, _ = BDF_COEFFICIENTS[bdf_order]
             coeffs = jnp.array(coeffs, dtype=jnp.float64)
@@ -371,9 +586,6 @@ class DAEOptimizerDEERMethods:
                 g_i = eval_g(t_i, x_i, z_i, p)
 
                 # Compute derivative approximation based on available history
-                # For step k, we can use up to BDF(min(k, order))
-                # Compute all possible BDF approximations and select based on step_idx
-
                 x_shifts = [ys[:n_states] for ys in y_shifts]
 
                 # Compute derivative using appropriate BDF order
@@ -386,7 +598,6 @@ class DAEOptimizerDEERMethods:
                     return dxdt / dt
 
                 # Select BDF order based on step index (use lower order for early steps)
-                # step_idx: 0=initial, 1=first step (use BDF1), 2=second step (use BDF2), etc.
                 dxdt = compute_bdf_deriv(1)  # Default BDF1
                 for k in range(2, bdf_order + 1):
                     dxdt = jnp.where(step_idx >= k, compute_bdf_deriv(k), dxdt)
@@ -402,7 +613,6 @@ class DAEOptimizerDEERMethods:
                          Y_i = [y_i; y_{i-1}; ...; y_{i-q+1}]
 
                 Returns: Augmented residual of size (q*n_y) matching the augmented state.
-                         R_aug = [R_phys(y_i); y_{i-1} - y_i_from_Y_{i-1}; y_{i-2} - y_{i-1}_from_Y_{i-1}; ...]
                 """
                 dt, t_i, step_idx = xinput
                 Y_i, Y_im1 = yshifts  # Each is augmented state of size (q*n_y)
@@ -410,10 +620,6 @@ class DAEOptimizerDEERMethods:
                 ny = n_states + n_alg
 
                 # Extract individual history terms from augmented states
-                # Y_i contains [y_i; y_{i-1}; ...; y_{i-q+1}]
-                # Y_{i-1} contains [y_{i-1}; y_{i-2}; ...; y_{i-q}]
-                # We need [y_i, y_{i-1}, ..., y_{i-q}] for the BDF formula
-
                 y_history = []
                 for k in range(n_history):
                     y_k = Y_i[k*ny:(k+1)*ny]
@@ -423,35 +629,19 @@ class DAEOptimizerDEERMethods:
                 y_history.append(y_iq)
 
                 # Compute physical residual for y_i
-                R_phys = implicit_residual_bdf(y_history, t_i, dt, params, step_idx)  # size ny
+                R_phys = implicit_residual_bdf(y_history, t_i, dt, params, step_idx)
 
                 # Compute history consistency residuals
-                # These enforce that the history in Y_i matches shifted history from Y_{i-1}
                 R_hist = []
                 for k in range(n_history - 1):
-                    # y_{i-k-1} from Y_i should equal y_{i-k} from Y_{i-1}
-                    y_from_Yi = Y_i[(k+1)*ny:(k+2)*ny]  # y_{i-k-1} in Y_i
-                    y_from_Yim1 = Y_im1[k*ny:(k+1)*ny]  # y_{i-k} in Y_{i-1}
+                    y_from_Yi = Y_i[(k+1)*ny:(k+2)*ny]
+                    y_from_Yim1 = Y_im1[k*ny:(k+1)*ny]
                     R_hist.append(y_from_Yi - y_from_Yim1)
 
-                # Concatenate all residuals
                 return jnp.concatenate([R_phys] + R_hist)
 
             def shifter_func(y, _):
-                """
-                Shifter for companion matrix approach.
-
-                Instead of returning [y_i, y_{i-1}, ..., y_{i-q}], we return
-                the augmented state Y_i = [y_i, y_{i-1}] where the companion
-                matrix structure handles the full history implicitly.
-
-                For BDF methods, we use a 2-term companion form:
-                    Y_i = [y_i; y_{i-1}; ...; y_{i-q+1}]
-                where Y_i is the augmented state of size (q * n_y).
-
-                This shifter returns [Y_i, Y_{i-1}] for the parallel scan.
-                """
-                # y has shape (nsamples, q*n_y) - augmented state
+                """Shifter for companion matrix approach."""
                 y_im1 = jnp.concatenate([y[:1], y[:-1]], axis=0)
                 return [y, y_im1]
 
@@ -459,57 +649,117 @@ class DAEOptimizerDEERMethods:
 
             def solve_inv_lin(jacs, z, inv_lin_params):
                 """
-                Solve BDF linear system using companion matrix + parallel associative scan.
+                Solve BDF linear system using block elimination + parallel scan.
 
-                With the augmented residual approach:
-                - deer_func returns residuals of size (nsamples, q*ny)
-                - Jacobians are (nsamples, q*ny, q*ny)
-                - We solve: M0 @ Y_i + M1 @ Y_{i-1} = z for 2-term recurrence
+                The augmented system M0 @ Y_i + M1 @ Y_{i-1} = z has block structure:
 
-                Args:
-                    jacs: List [M0, M1] of Jacobians, each shape (nsamples, q*ny, q*ny)
-                    z: Residuals of shape (nsamples, q*ny)
-                    inv_lin_params: Tuple containing (y0,) initial condition (size ny, physical state)
+                M0 = -dR/dY_i (NEGATED Jacobian from DEER):
+                     [B0, B1, ..., B_{q-1}]   <- first ny rows (physics)
+                     [-I,  0,  ..., 0     ]   <- shift constraints (negated)
+                     [0,  -I,  ..., 0     ]
+                     ...
 
-                Returns:
-                    Y_full: Augmented state trajectory (nsamples, q*ny)
+                M1 = -dR/dY_{i-1} (NEGATED Jacobian from DEER):
+                     [C0, C1, ..., C_{q-1}]   <- physics coupling to Y_{i-1}
+                     [+I, 0,  ..., 0      ]   <- shift: from -(-I)
+                     [0, +I,  ..., 0      ]
+                     ...
+
+                Partition Y_i = [y_i; h_i] where h_i has (q-1)*ny components.
+
+                Bottom equations give: h_i = S @ Y_{i-1} + r_i  (shift + RHS)
+                Substitute into top: B0 @ y_i = z_top - [B1..B_{q-1}] @ h_i - M1_top @ Y_{i-1}
+
+                This reduces each timestep to one ny×ny solve instead of (q*ny)×(q*ny).
                 """
                 y0, = inv_lin_params
                 nsamples = z.shape[0]
-                ny = y0.shape[0]  # Size of physical state
+                ny = y0.shape[0]
+                q = n_history
+                ny_aug = q * ny
+                ny_hist = (q - 1) * ny  # Size of history part h_i
 
-                # M0 and M1 are the Jacobians for the 2-term recurrence
-                M0, *M_rest = jacs  # M0: (nsamples, q*ny, q*ny), M_rest: [M1]
+                M0, M1 = jacs  # M0, M1: (nsamples, q*ny, q*ny)
 
-                # For 2-term recurrence: just use M0 and M1 directly
-                M_aug_all = M0  # (nsamples, q*ny, q*ny)
-                M_shift_all = M_rest[0] if len(M_rest) > 0 else jnp.zeros_like(M0)
+                # Build initial augmented state: Y0 = [y0; y0; ...; y0]
+                Y0 = jnp.tile(y0, q)  # (q*ny,)
 
-                # Build augmented initial condition: Y0 = [y0; y0; ...; y0]
-                Y0 = jnp.tile(y0, n_history)  # shape (q*ny,)
+                # Extract block structure from M0 and M1 (first row of blocks)
+                # B0 = M0[:, :ny, :ny]           - Jacobian of physics w.r.t. y_i
+                # Bh = M0[:, :ny, ny:]           - Jacobian of physics w.r.t. h_i (history in Y_i)
+                # M1_top = M1[:, :ny, :]         - Jacobian of physics w.r.t. Y_{i-1}
 
-                # For timesteps 1 to nsamples-1 (excluding initial timestep 0)
-                M_aug_scan = M_aug_all[1:]      # shape (nsamples-1, q*ny, q*ny)
-                M_shift_scan = M_shift_all[1:]  # shape (nsamples-1, q*ny, q*ny)
-                z_aug_scan = z[1:]              # shape (nsamples-1, q*ny)
+                # The bottom (q-1)*ny rows encode shift constraints:
+                # h_i[k] - Y_{i-1}[k] = z_bottom[k]  =>  h_i = Y_{i-1}[:ny_hist] + z_bottom
+                # In terms of full Y_{i-1}: h_i = S_select @ Y_{i-1} + z_bottom
+                # where S_select picks the first (q-1) blocks of Y_{i-1}
 
-                # Solve: M_aug @ Y_i = z - M_shift @ Y_{i-1}
-                # Compute: M_aug^{-1} @ (-M_shift)
-                M_aug_inv_M_shift = -vmap(jnp.linalg.solve)(M_aug_scan, M_shift_scan)
-                # Compute: M_aug^{-1} @ z_aug
-                M_aug_inv_z = vmap(jnp.linalg.solve)(M_aug_scan, z_aug_scan)
+                # Build shift/selection matrix for history: picks first (q-1)*ny of Y_{i-1}
+                S_hist = jnp.zeros((ny_hist, ny_aug), dtype=jnp.float64)
+                S_hist = S_hist.at[:ny_hist, :ny_hist].set(jnp.eye(ny_hist))
 
-                # Parallel scan: Y_i = A_i @ Y_{i-1} + b_i
-                # mat mul_recursive returns results for all input timesteps (nsamples-1)
-                Y_result = matmul_recursive(M_aug_inv_M_shift, M_aug_inv_z, Y0)
-                # Y_result has shape (nsamples-1, q*ny) according to input shape
+                def compute_Ab(M0_i, M1_i, z_i):
+                    """
+                    Compute A, b for Y_i = A @ Y_{i-1} + b using block elimination.
+                    """
+                    # Extract blocks
+                    B0 = M0_i[:ny, :ny]              # (ny, ny)
+                    Bh = M0_i[:ny, ny:]              # (ny, ny_hist)
+                    M1_top = M1_i[:ny, :]            # (ny, q*ny)
+                    z_top = z_i[:ny]                 # (ny,)
+                    z_bottom = z_i[ny:]              # (ny_hist,)
 
-                # Prepend Y0 to get full trajectory including initial condition
+                    # DEER passes NEGATED Jacobians: M0 = -dR/dY_i, M1 = -dR/dY_{i-1}
+                    #
+                    # For R_hist[k] = Y_i[(k+1)*ny:...] - Y_{i-1}[k*ny:...]:
+                    #   dR_hist/dY_i has +I => M0_bottom has -I
+                    #   dR_hist/dY_{i-1} has -I => M1_bottom has +I
+                    #
+                    # Bottom equations: (-I) @ h_i + (+I) @ Y_{i-1}[:ny_hist] = z_bottom
+                    # => h_i = Y_{i-1}[:ny_hist] - z_bottom = S_hist @ Y_{i-1} - z_bottom
+
+                    # Top equation: B0 @ y_i + Bh @ h_i + M1_top @ Y_{i-1} = z_top
+                    # Substitute h_i = S_hist @ Y_{i-1} - z_bottom:
+                    # B0 @ y_i + Bh @ (S_hist @ Y_{i-1} - z_bottom) + M1_top @ Y_{i-1} = z_top
+                    # B0 @ y_i = z_top + Bh @ z_bottom - (Bh @ S_hist + M1_top) @ Y_{i-1}
+                    #
+                    # Let: rhs_y = z_top + Bh @ z_bottom
+                    #      C_y = Bh @ S_hist + M1_top
+                    # Then: y_i = B0^{-1} @ rhs_y - B0^{-1} @ C_y @ Y_{i-1}
+
+                    rhs_y = z_top + Bh @ z_bottom                    # (ny,)
+                    C_y = Bh @ S_hist + M1_top                       # (ny, q*ny)
+
+                    # Solve the ny×ny system
+                    B0_inv_rhs = jnp.linalg.solve(B0, rhs_y)         # (ny,)
+                    B0_inv_Cy = jnp.linalg.solve(B0, C_y)            # (ny, q*ny)
+
+                    # Now construct full A and b for Y_i = [y_i; h_i]
+                    # y_i = -B0_inv_Cy @ Y_{i-1} + B0_inv_rhs
+                    # h_i = S_hist @ Y_{i-1} - z_bottom
+                    #
+                    # So: A = [-B0_inv_Cy]    b = [B0_inv_rhs ]
+                    #         [S_hist    ]        [-z_bottom  ]
+
+                    A = jnp.zeros((ny_aug, ny_aug), dtype=jnp.float64)
+                    A = A.at[:ny, :].set(-B0_inv_Cy)
+                    A = A.at[ny:, :].set(S_hist)
+
+                    b = jnp.zeros(ny_aug, dtype=jnp.float64)
+                    b = b.at[:ny].set(B0_inv_rhs)
+                    b = b.at[ny:].set(-z_bottom)
+
+                    return A, b
+
+                # Compute A, b for timesteps 1 to nsamples-1
+                A_all, b_all = vmap(compute_Ab)(M0[1:], M1[1:], z[1:])
+
+                # Parallel scan
+                Y_result = matmul_recursive(A_all, b_all, Y0)
+
+                # Prepend Y0
                 Y_full = jnp.concatenate([Y0[None, :], Y_result], axis=0)
-                # Y_full should have shape (nsamples, q*ny)
 
-                # Return only nsamples elements to match input size
-                # (in case matmul_recursive added an extra element)
                 return Y_full[:nsamples]
 
         # Store method-specific functions
@@ -642,6 +892,17 @@ class DAEOptimizerDEERMethods:
 
         return np.array(p_new), float(loss), np.array(grad_p)
 
+    def _adam_update_step(self, p, grad, m, v, t, beta1, beta2, epsilon, step_size):
+        """Adam optimizer update step."""
+        t_new = t + 1
+        m_new = beta1 * m + (1 - beta1) * grad
+        v_new = beta2 * v + (1 - beta2) * (grad ** 2)
+        m_hat = m_new / (1 - beta1 ** t_new)
+        v_hat = v_new / (1 - beta2 ** t_new)
+        p_new = p - step_size * m_hat / (jnp.sqrt(v_hat) + epsilon)
+        return p_new, m_new, v_new, t_new
+
+
     def optimize(
         self,
         t_array: np.ndarray,
@@ -650,18 +911,42 @@ class DAEOptimizerDEERMethods:
         n_iterations: int = 100,
         step_size: float = 0.01,
         tol: float = 1e-6,
-        verbose: bool = True
+        verbose: bool = True,
+        algorithm_config: Optional[Dict] = None
     ) -> Dict:
         """Optimize parameters."""
+        # Parse algorithm configuration
+        if algorithm_config is None:
+            self.algorithm_type = 'SGD'
+            self.algorithm_params = {'step_size': step_size}
+        else:
+            self.algorithm_type = algorithm_config.get('type', 'SGD').upper()
+            self.algorithm_params = algorithm_config.get('params', {})
+            if 'step_size' not in self.algorithm_params:
+                self.algorithm_params['step_size'] = step_size
+        
+        algo_step_size = self.algorithm_params.get('step_size', step_size)
+        
         if verbose:
             print("\n" + "=" * 80)
             print(f"DEER Optimization ({self.method})")
             print("=" * 80)
+            print(f"  Algorithm: {self.algorithm_type}")
+            if self.algorithm_type == 'ADAM':
+                print(f"  Beta1: {self.algorithm_params.get('beta1', 0.9)}")
+                print(f"  Beta2: {self.algorithm_params.get('beta2', 0.999)}")
+                print(f"  Epsilon: {self.algorithm_params.get('epsilon', 1e-8)}")
 
         if p_init is not None:
             p = jnp.array(p_init, dtype=jnp.float64)
         else:
             p = jnp.array([self.p_all[i] for i in self.optimize_indices], dtype=jnp.float64)
+        
+        # Initialize Adam state if using Adam
+        if self.algorithm_type == 'ADAM':
+            self.adam_m = jnp.zeros_like(p)
+            self.adam_v = jnp.zeros_like(p)
+            self.adam_t = 0
 
         self.history = {k: [] for k in self.history}
         converged = False
@@ -672,7 +957,23 @@ class DAEOptimizerDEERMethods:
 
         for it in range(n_iterations):
             t_start = time.time()
-            p_new, loss, grad_p = self.optimization_step(t_array, y_target_use, np.array(p), step_size)
+            
+            # Compute gradient
+            _, loss, grad_p = self.optimization_step(t_array, y_target_use, np.array(p), algo_step_size)
+            
+            # Apply parameter update based on algorithm
+            if self.algorithm_type == 'ADAM':
+                beta1 = self.algorithm_params.get('beta1', 0.9)
+                beta2 = self.algorithm_params.get('beta2', 0.999)
+                epsilon = self.algorithm_params.get('epsilon', 1e-8)
+                
+                p_new, self.adam_m, self.adam_v, self.adam_t = self._adam_update_step(
+                    p, grad_p, self.adam_m, self.adam_v, self.adam_t,
+                    beta1, beta2, epsilon, algo_step_size
+                )
+            else:  # SGD
+                p_new = p - algo_step_size * jnp.array(grad_p)
+                
             iter_time = time.time() - t_start
 
             grad_norm = float(np.linalg.norm(grad_p))

@@ -169,13 +169,24 @@ def example_parameter_identification_jax_ad(config: dict):
     else:
         p_init_opt = p_init
 
+    # Get algorithm configuration from config
+    algorithm_config = opt_cfg.get('algorithm')
+    if algorithm_config:
+        print(f"\nOptimizer algorithm: {algorithm_config.get('type', 'SGD')}")
+    
+    # Extract step_size for backward compatibility
+    if algorithm_config and 'params' in algorithm_config:
+        step_size = algorithm_config['params'].get('step_size', 0.01)
+    else:
+        step_size = opt_cfg.get('step_size', 0.01)
+    
     result_opt = optimizer.optimize(
         t_array=t_ref,
         y_target=y_ref.T,  # Transpose to (n_time, n_outputs)
         p_init=p_init_opt,
-        n_iterations=opt_cfg['max_iterations'],
-        step_size=opt_cfg['step_size'],
-        tol=opt_cfg['tol'],
+        n_iterations=opt_cfg.get('max_iterations', 100),
+        step_size=step_size,
+        tol=opt_cfg.get('tol', 1e-6),
         verbose=True
     )
 

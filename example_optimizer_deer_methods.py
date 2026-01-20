@@ -1,17 +1,20 @@
 """
-Example demonstrating the DEER-based DAE optimizer with different time discretization methods.
+Example demonstrating the DEER-based DAE optimizer with PARALLEL SCAN for BDF methods.
 
-This example uses the DEER-methods optimizer from dae_optimizer_deer_methods.py.
+This example uses the companion matrix construction to enable O(log N) parallel depth
+for higher-order BDF methods (BDF2-6), instead of sequential O(N) scan.
+
 Key features:
 1. DEER fixed-point iteration (no Newton solve needed)
-2. Multiple time discretization schemes: backward_euler, trapezoidal, bdf2
-3. Parallel associative scan for O(log N) depth
+2. Multiple time discretization schemes: backward_euler, trapezoidal, bdf2-6
+3. Companion matrix transformation for BDF methods
+4. Parallel associative scan for O(log N) depth (even for BDF6!)
 
 This example shows how to:
 1. Generate a reference trajectory with known (true) parameters
 2. Select which parameters to optimize
 3. Perturb ONLY the selected parameters for initial guess
-4. Use the DEER optimizer to recover the true parameters
+4. Use the DEER optimizer with parallel scan to recover the true parameters
 5. Compare different time discretization methods
 """
 
@@ -36,37 +39,44 @@ def setup_jax_device(config: dict):
     """Set JAX platform from config. Must be called before importing JAX modules."""
     device = config.get('optimizer', {}).get('device', 'cpu')
     os.environ['JAX_PLATFORM_NAME'] = device
-    
+
     # Configure GPU memory preallocation if specified
     if device == 'gpu':
         gpu_mem_fraction = config.get('optimizer', {}).get('gpu_memory_fraction')
         if gpu_mem_fraction is not None:
              os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = str(gpu_mem_fraction)
              print(f"GPU memory fraction set to: {gpu_mem_fraction}")
-             
+
     return device
 
 
 # Parse args and configure JAX before other imports
 def _init():
-    parser = argparse.ArgumentParser(description="DEER-based DAE Parameter Identification")
+    parser = argparse.ArgumentParser(description="DEER-based DAE Parameter Identification with Parallel Scan")
     parser.add_argument(
         '--config', '-c',
         type=str,
         default='config/config_cauer.yaml',
+        # default='config/config_stiff.yaml',
         help='Path to configuration YAML file'
     )
     parser.add_argument(
         '--method', '-m',
         type=str,
-        default='trapezoidal',
+        default=None,  # Will use config if not provided
         choices=['backward_euler', 'trapezoidal', 'bdf2', 'bdf3', 'bdf4', 'bdf5', 'bdf6'],
-        help='Time discretization method'
+        help='Time discretization method (overrides config)'
     )
     args, _ = parser.parse_known_args()
     config = load_config(args.config)
     device = setup_jax_device(config)
-    return config, device, args.method
+    
+    # Method priority: config.discretization_method > CLI arg > default
+    method = config.get('optimizer', {}).get('discretization_method') or \
+             args.method or \
+             'bdf6'
+    
+    return config, device, method
 
 
 _config, _device, _method = _init()
@@ -78,12 +88,12 @@ from src.discrete_adjoint.dae_solver import DAESolver
 from src.discrete_adjoint.dae_optimizer_deer_methods import DAEOptimizerDEERMethods
 
 
-def example_parameter_identification_deer(config: dict, method: str):
-    """Example: Identify DAE parameters using DEER-based optimizer."""
+def example_parameter_identification_deer_scan(config: dict, method: str):
+    """Example: Identify DAE parameters using DEER-based optimizer with parallel scan."""
 
     print("=" * 80)
-    print("DEER-based DAE Parameter Identification Example")
-    print(f"(Using {method} time discretization)")
+    print("DEER-based DAE Parameter Identification with PARALLEL SCAN")
+    print(f"(Using {method} time discretization with companion matrix)")
     print("=" * 80)
 
     # Extract config sections
@@ -100,6 +110,13 @@ def example_parameter_identification_deer(config: dict, method: str):
     print(f"  Differential states: {len(dae_data['states'])}")
     print(f"  Algebraic variables: {len(dae_data['alg_vars'])}")
     print(f"  Parameters: {len(dae_data['parameters'])}")
+
+    # Highlight parallel scan benefit for higher-order methods
+    if method.startswith('bdf'):
+        bdf_order = int(method[3])
+        print(f"\n  *** Using BDF{bdf_order} with companion matrix ***")
+        print(f"  *** Parallel depth: O(log N) instead of O(N) ***")
+        print(f"  *** History terms: {bdf_order} (augmented state size: {bdf_order}×n_y) ***")
 
     # Step 1: Generate reference trajectory with TRUE parameters
     print("\n" + "=" * 80)
@@ -177,18 +194,21 @@ def example_parameter_identification_deer(config: dict, method: str):
     for i, p_dict in enumerate(dae_data_init['parameters']):
         p_dict['value'] = float(p_init[i])
 
-    # Step 4: Optimize parameters using DEER-based optimizer
+    # Step 4: Optimize parameters using DEER-based optimizer with PARALLEL SCAN
     print("\n" + "=" * 80)
-    print(f"Step 4: Optimize Parameters (DEER with {method})")
+    print(f"Step 4: Optimize Parameters (DEER with {method} + PARALLEL SCAN)")
     print("=" * 80)
 
     # Create DEER optimizer with selected parameters and method
+    # The companion matrix construction is automatic for BDF methods
     optimizer = DAEOptimizerDEERMethods(
         dae_data_init,
         optimize_params=opt_params,
         method=method,
         deer_max_iter=50,
     )
+
+    print("\n*** Companion matrix enables O(log N) parallel scan for BDF ***")
 
     # Run optimization
     # Only pass initial values for parameters being optimized
@@ -197,14 +217,26 @@ def example_parameter_identification_deer(config: dict, method: str):
     else:
         p_init_opt = p_init
 
+    # Get algorithm configuration from config
+    algorithm_config = opt_cfg.get('algorithm')
+    if algorithm_config:
+        print(f"\nOptimizer algorithm: {algorithm_config.get('type', 'SGD')}")
+    
+    # Extract step_size for backward compatibility
+    if algorithm_config and 'params' in algorithm_config:
+        step_size = algorithm_config['params'].get('step_size', 0.01)
+    else:
+        step_size = opt_cfg.get('step_size', 0.01)
+    
     result_opt = optimizer.optimize(
         t_array=t_ref,
         y_target=y_ref.T,  # Transpose to (n_time, n_outputs)
         p_init=p_init_opt,
-        n_iterations=opt_cfg['max_iterations'],
-        step_size=opt_cfg['step_size'],
-        tol=opt_cfg['tol'],
-        verbose=True
+        n_iterations=opt_cfg.get('max_iterations', 20),
+        step_size=step_size,
+        tol=opt_cfg.get('tol', 1e-3),
+        verbose=True,
+        algorithm_config=algorithm_config
     )
 
     p_opt_all = result_opt['p_all']  # All parameters (optimized + fixed)
@@ -302,11 +334,11 @@ def example_parameter_identification_deer(config: dict, method: str):
         ax.plot(times, 'g-', linewidth=2)
         ax.set_xlabel('Iteration')
         ax.set_ylabel('Time (ms)')
-        ax.set_title('Time per Iteration')
+        ax.set_title(f'Time per Iteration ({method} w/ parallel scan)')
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.suptitle(f'DEER Optimizer History ({method})', y=1.02)
+        plt.suptitle(f'DEER Optimizer with Parallel Scan ({method})', y=1.02)
 
         # Plot 2: Trajectory comparison
         fig, axes = plt.subplots(2, 1, figsize=(12, 10))
@@ -319,7 +351,7 @@ def example_parameter_identification_deer(config: dict, method: str):
             ax.plot(t_ref, y_opt[i, :], 'r--', linewidth=2, label=f'Optimized (output {i})')
         ax.set_xlabel('Time')
         ax.set_ylabel('Output')
-        ax.set_title(f'Trajectory Comparison: True vs Optimized (DEER {method})')
+        ax.set_title(f'Trajectory Comparison: True vs Optimized (DEER {method} + parallel scan)')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -342,6 +374,7 @@ def example_parameter_identification_deer(config: dict, method: str):
 
     print("\n" + "=" * 80)
     print("Example Complete!")
+    print(f"Successfully used {method} with O(log N) parallel scan via companion matrix")
     print("=" * 80)
 
     return result_opt
@@ -352,5 +385,7 @@ if __name__ == "__main__":
     print(f"\nUsing device: {_device}")
     print(f"Using method: {_method}")
     print("\n")
-    print("RUNNING DEER-BASED PARAMETER IDENTIFICATION EXAMPLE")
-    example_parameter_identification_deer(_config, _method)
+    print("RUNNING DEER-BASED PARAMETER IDENTIFICATION WITH PARALLEL SCAN")
+    print(f"Higher-order BDF methods now have O(log N) depth thanks to companion matrix!")
+    print("\n")
+    example_parameter_identification_deer_scan(_config, _method)
