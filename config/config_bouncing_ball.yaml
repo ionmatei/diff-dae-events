@@ -1,0 +1,31 @@
+dae_solver:
+  atol: 0.0001
+  rtol: 0.0001
+  start_time: 0.0
+  stop_time: 3.0
+  ncp: 1000
+  dae_specification_file: dae_examples/dae_specification_bouncing_ball.json
+  
+optimizer:
+  discretization_method: bdf6  # backward_euler, trapezoidal, bdf2, bdf3, bdf4, bdf5, bdf6
+  algorithm:
+    type: "SGD"  # "SGD" or "ADAM"
+    params:
+      step_size: 0.003
+      # Adam-specific parameters (ignored for SGD):
+      beta1: 0.9
+      beta2: 0.999
+      epsilon: 1.0e-8
+  opt_params:
+    - g
+    - e
+  loss_type: mean
+  max_iterations: 500
+  tol: 0.001
+  print_every: 10
+  device: cpu
+  gpu_memory_fraction: 0.9
+  sequential_fallback:
+    enable: False
+    threshold: 500
+

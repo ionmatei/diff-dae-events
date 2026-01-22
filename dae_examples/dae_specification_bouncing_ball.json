@@ -1,0 +1,45 @@
+{
+  "states": [
+    {
+      "name": "h",
+      "type": "float",
+      "start": 1,
+      "orig_name": "h"
+    },
+    {
+      "name": "v",
+      "type": "float",
+      "start": 0,
+      "orig_name": "v"
+    }
+  ],
+  "alg_vars": [],
+  "inputs": null,
+  "outputs": null,
+  "parameters": [
+    {
+      "name": "g",
+      "type": "float",
+      "value": 9.81,
+      "orig_name": "g"
+    },
+    {
+      "name": "e",
+      "type": "float",
+      "value": 0.8,
+      "orig_name": "e"
+    }
+  ],
+  "f": [
+    "der(h) = v",
+    "der(v) = -g"
+  ],
+  "g": [],
+  "h": [],
+  "when": [
+    {
+      "condition": "h<0",
+      "reinit": "v + e*prev(v)= 0"
+    }
+  ]
+}

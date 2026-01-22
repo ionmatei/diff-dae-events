@@ -515,58 +515,59 @@ class DAESolver:
         var_type, var_idx = self.event_reinit_vars[event_idx]
         var_name = self.event_reinit_var_names[event_idx]
         
-        # -----------------------------------------------------------
-        # FIX 1: Create base namespace ONCE using x_pre/z_pre
-        # This ensures parallel execution semantics for simultaneous events
-        # -----------------------------------------------------------
-        base_ns = self._create_eval_namespace(t, x_pre, z_pre)
-        
-        # Add prev values DIRECTLY into namespace with "prev_" prefix
-        for i, name in enumerate(self.state_names):
-            base_ns[f'prev_{name}'] = x_pre[i]
-        for i, name in enumerate(self.alg_names):
-            base_ns[f'prev_{name}'] = z_pre[i]
-        
-        # Add prev() as a function too (for explicit calls)
-        def prev(var_name):
-            if var_name in self.state_names:
-                idx = self.state_names.index(var_name)
-                return x_pre[idx]
-            elif var_name in self.alg_names:
-                idx = self.alg_names.index(var_name)
-                return z_pre[idx]
+        # Create namespace with prev() operator support
+        def create_namespace_for_var(var_value):
+            """Create namespace with given value for the reinit variable."""
+            # Start with current state
+            x_temp = x.copy()
+            z_temp = z.copy()
+            
+            # Set the variable being reinitialized
+            if var_type == 'state':
+                x_temp[var_idx] = var_value
             else:
-                raise ValueError(f"Unknown variable in prev(): {var_name}")
+                z_temp[var_idx] = var_value
+            
+            ns = self._create_eval_namespace(t, x_temp, z_temp)
+            
+            # Add prev values DIRECTLY into namespace with "prev_" prefix
+            # This way prev(v) can be interpreted as prev_v
+            for i, name in enumerate(self.state_names):
+                ns[f'prev_{name}'] = x_pre[i]
+            for i, name in enumerate(self.alg_names):
+                ns[f'prev_{name}'] = z_pre[i]
+            
+            # Add prev() as a function too (for explicit calls)
+            def prev(var_name):
+                if var_name in self.state_names:
+                    idx = self.state_names.index(var_name)
+                    return x_pre[idx]
+                elif var_name in self.alg_names:
+                    idx = self.alg_names.index(var_name)
+                    return z_pre[idx]
+                else:
+                    raise ValueError(f"Unknown variable in prev(): {var_name}")
+            
+            ns['prev'] = prev
+            return ns
         
-        base_ns['prev'] = prev
-        
-        # -----------------------------------------------------------
-        # FIX 2: Improved regex with whitespace handling  
-        # -----------------------------------------------------------
+        #Replace prev(var) with prev_var in the equation
         import re
         reinit_equation_modified = reinit_equation
-        # Allow optional whitespace: prev( var ) or prev(var)
-        prev_pattern = r'prev\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)'
+        # Find all prev(variable_name) and replace with prev_variable_name
+        prev_pattern = r'prev\(([a-zA-Z_][a-zA-Z0-9_]*)\)'
         reinit_equation_modified = re.sub(prev_pattern, r'prev_\1', reinit_equation_modified)
         
-        # -----------------------------------------------------------
-        # FIX 3: Optimized residual using pre-created base namespace
-        # -----------------------------------------------------------
+        # Define residual function for solving the equation
         def residual(var_value_array):
             var_value = var_value_array[0]
-            
-            # Shallow copy to avoid polluting base namespace
-            current_ns = base_ns.copy()
-            
-            # Update only the variable being solved for
-            current_ns[var_name] = var_value
-            
+            ns = create_namespace_for_var(var_value)
             try:
-                res = eval(reinit_equation_modified, current_ns)
+                res = eval(reinit_equation_modified, ns)
                 return [res]
             except Exception as e:
                 print(f"Error evaluating reinit equation for event {event_idx}: {reinit_equation_modified}")
-                print(f"Namespace keys: {list(current_ns.keys())}")
+                print(f"Namespace keys: {list(ns.keys())}")
                 print(f"Error: {e}")
                 raise
 
@@ -1465,6 +1466,252 @@ class DAESolver:
             y_curr = sol.values.y[-1, :]
             yp_curr = sol.values.ydot[-1, :]
             
+            # Check solver status
+            if sol.flag == 2:  # Root found (event detected)
+                if verbose:
+                    print(f"    Event detected at t={t_curr:.6f}")
+                
+                # Extract current state
+                x_curr = y_curr[:n_states]
+                z_curr = y_curr[n_states:]
+                
+                # Evaluate zero-crossing functions
+                zc_vals = self.eval_zc(t_curr, x_curr, z_curr)
+                cond_active_curr = (zc_vals < 0)
+                
+                # Check for event frequency violation
+                if min_event_delta is not None:
+                    time_since_last = t_curr - last_event_time
+                    if time_since_last < min_event_delta and last_event_time > -np.inf:
+                        if verbose:
+                            print(f"    Event frequency threshold violated!")
+                            print(f"    Time since last event: {time_since_last:.6e} < {min_event_delta:.6e}")
+                            print(f"    Terminating simulation early at t={t_curr:.6f}")
+                        early_termination = True
+                        break
+                
+                # Find which event(s) triggered (falling edge: False -> True)
+                for i in range(self.n_events):
+                    if not cond_active_prev[i] and cond_active_curr[i]:
+                        # Event i became active
+                        if verbose:
+                            print(f"    Event {i} triggered: {self.when_clauses[i]['condition']}")
+                        
+                        # Store pre-event values for prev() operator
+                        x_pre = x_curr.copy()
+                        z_pre = z_curr.copy()
+                        
+                        # Apply reinitialization
+                        x_new, z_new = self._apply_reinit(i, t_curr, x_curr, z_curr, x_pre, z_pre)
+                        
+                        # Track what changed
+                        var_name = self.event_reinit_var_names[i]
+                        var_type, var_idx = self.event_reinit_vars[i]
+                        old_val = x_pre[var_idx] if var_type == 'state' else z_pre[var_idx]
+                        new_val = x_new[var_idx] if var_type == 'state' else z_new[var_idx]
+                        
+                        event_times.append(t_curr)
+                        event_indices.append(i)
+                        event_vars_changed.append((var_name, old_val, new_val))
+                        
+                        if verbose:
+                            print(f"      Reinitialized {var_name}: {old_val:.6e} -> {new_val:.6e}")
+                        
+                        # Update current state
+                        x_curr = x_new
+                        z_curr = z_new
+                        y_curr = np.concatenate([x_curr, z_curr])
+                        
+                        # Recompute derivatives after reinitialization
+                        f_new = self.eval_f(t_curr, x_curr, z_curr)
+                        yp_curr = np.concatenate([f_new, np.zeros(len(z_curr))])
+                
+                # Update boolean state memory
+                cond_active_prev = cond_active_curr.copy()
+                last_event_time = t_curr
+                
+            elif sol.flag == 0:  # Success - reached t_end
+                if verbose:
+                    print(f"  Successfully reached t_end = {t_end:.6f}")
+                break
+            else:
+                print(f"Warning: Solver returned flag {sol.flag}: {sol.message}")
+                break
+        
+        if iteration >= max_iterations:
+            print(f"Warning: Maximum iterations ({max_iterations}) reached")
+            early_termination = True
+        
+        # Convert lists to arrays
+        t_all = np.array(t_all)
+        y_all = np.array(y_all)
+        
+        # Split into differential and algebraic
+        x = y_all[:, :n_states].T
+        z = y_all[:, n_states:].T
+        
+        # Compute outputs
+        if self.h_funcs:
+            n_outputs = len(self.h_funcs)
+        else:
+            n_outputs = n_states
+        
+        y_out = np.zeros((n_outputs, len(t_all)))
+        for i in range(len(t_all)):
+            y_out[:, i] = self.eval_h(t_all[i], x[:, i], z[:, i])
+        
+        if verbose:
+            print(f"\nSimulation complete!")
+            print(f"  Final time: {t_all[-1]:.6f}")
+            print(f"  Total events: {len(event_times)}")
+            if len(event_times) > 0:
+                print(f"  Event times: {event_times}")
+            print(f"  Early termination: {early_termination}")
+        
+        result = {
+            't': t_all,
+            'x': x,
+            'z': z,
+            'y': y_out,
+            'event_times': event_times,
+            'event_indices': event_indices,
+            'event_vars_changed': event_vars_changed,
+            'early_termination': early_termination,
+            'state_names': self.state_names,
+            'alg_names': self.alg_names,
+            'output_names': self.output_names if self.output_names else self.state_names,
+        }
+        
+        return result
+
+
+    def solve_with_events(self,
+                          t_span: Tuple[float, float],
+                          ncp: int = 500,
+                          rtol: float = 1e-6,
+                          atol: float = 1e-8,
+                          min_event_delta: float = None,
+                          verbose: bool = False,
+                          **kwargs) -> Dict:
+        """
+        Solve the DAE with event handling using SUNDIALS IDA.
+        
+        Events are detected via zero-crossing functions and trigger reinitialization.
+        
+        Args:
+            t_span: Time span (t_start, t_end)
+            ncp: Approximate number of output points
+            rtol: Relative tolerance
+            atol: Absolute tolerance
+            min_event_delta: Minimum time between events (stops if violated)
+            verbose: Print progress information
+            **kwargs: Additional options passed to IDA
+        
+        Returns:
+            Dictionary containing:
+                - t: time points
+                - x: differential states
+                - z: algebraic variables
+                - y: outputs
+                - event_times: list of event times
+                - event_indices: list of event indices that triggered
+                - event_vars_changed: list of (var_name, old_val, new_val) for each event
+                - early_termination: True if stopped due to event frequency threshold
+                - state_names, alg_names, output_names: variable names
+        """
+        if verbose:
+            print(f"\nSolving DAE with events from t={t_span[0]} to t={t_span[1]}")
+            print(f"  Events enabled: {self.n_events > 0}")
+            print(f"  Event frequency threshold: {min_event_delta if min_event_delta else 'None'}")
+        
+        # If no events, use regular solve
+        if self.n_events == 0:
+            if verbose:
+                print("  No events detected, using regular solve method")
+            result = self.solve(t_span, ncp, rtol, atol, verbose, **kwargs)
+            result['event_times'] = []
+            result['event_indices'] = []
+            result['event_vars_changed'] = []
+            result['early_termination'] = False
+            return result
+        
+        # Initialize
+        t_start, t_end = t_span
+        t_curr = t_start
+        y_curr = np.concatenate([self.x0, self.z0])
+        n_states = len(self.state_names)
+        
+        # Calculate initial derivatives
+        f0 = self.eval_f(t_curr, self.x0, self.z0)
+        yp_curr = np.concatenate([f0, np.zeros(len(self.z0))])
+        
+        # Initialize event tracking
+        zc_vals = self.eval_zc(t_curr, self.x0, self.z0)
+        cond_active_prev = (zc_vals < 0)  # Boolean state memory
+        
+        event_times = []
+        event_indices = []
+        event_vars_changed = []
+        last_event_time = -np.inf
+        
+        # Storage for results
+        t_all = [t_curr]
+        y_all = [y_curr.copy()]
+        
+        early_termination = False
+        iteration = 0
+        max_iterations = 10000  # Safety limit
+        
+        if verbose:
+            print(f"  Initial zero-crossing values: {zc_vals}")
+            print(f"  Initial condition states: {cond_active_prev}")
+        
+        while t_curr < t_end and iteration < max_iterations:
+            iteration += 1
+            
+            # Configure solver
+            n_total = len(y_curr)
+            algvar_indices = np.arange(n_states, n_total)
+            
+            solver = dae(
+                'ida',
+                self.residual_ida,
+                rtol=rtol,
+                atol=atol,
+                **kwargs
+            )
+            
+            solver.set_options(algebraic_vars_idx=algvar_indices)
+            solver.set_options(compute_initcond='yp0')
+            
+            # Set up root finding for events
+            if self.n_events > 0:
+                solver.set_options(
+                    rootfn=self._root_fn_wrapper,
+                    nr_rootfns=self.n_events
+                )
+            
+            # Create time segment
+            remaining_time = t_end - t_curr
+            n_seg = max(int(ncp * remaining_time / (t_end - t_start)), 2)
+            t_segment = np.linspace(t_curr, t_end, n_seg)
+            
+            # Solve until next event or end time
+            if verbose and iteration % 10 == 1:
+                print(f"  Iteration {iteration}: Solving from t={t_curr:.6f} to t={t_end:.6f}")
+            
+            sol = solver.solve(t_segment, y_curr, yp_curr)
+            
+            # Append results (skip first point if not the initial time)
+            start_idx = 0 if iteration == 1 else 1
+            if len(sol.values.t) > start_idx:
+                t_all.extend(sol.values.t[start_idx:])
+                y_all.extend(sol.values.y[start_idx:, :])
+            
+            # Update current state
+            t_curr = sol.values.t[-1]
+            y_curr = sol.values.y[-1, :]
+            yp_curr = sol.values.ydot[-1, :]
             
             # Check solver status
             if sol.flag == 2:  # Root found (event detected)
@@ -1475,44 +1722,14 @@ class DAESolver:
                 x_curr = y_curr[:n_states]
                 z_curr = y_curr[n_states:]
                 
-                # -----------------------------------------------------------
-                # FIX 1: Use IDA's root info instead of manual 'abs < 0.1' check
-                # -----------------------------------------------------------
-                # sol.roots.val is usually an array of integers (1, -1, 0)
-                # indicating which root function had a sign change.
-                triggered_indices = []
-                if hasattr(sol, 'roots') and hasattr(sol.roots, 'val'):
-                    # Find indices where root info is non-zero
-                    triggered_indices = [idx for idx, val in enumerate(sol.roots.val) if val != 0]
-                    if verbose:
-                        print(f"      IDA roots info: {sol.roots.val}")
-                        print(f"      Triggered indices from IDA: {triggered_indices}")
-                else:
-                    # Fallback if wrapper doesn't expose roots
-                    # IDA only returns flag=2 if it found a root, so at least one zc must be near 0
-                    # IDA may return state slightly past the root, so use reasonable tolerance
-                    zc_check = self.eval_zc(t_curr, x_curr, z_curr)
-                    triggered_indices = []
-                    zc_tolerance = 0.05  # Tighter than old 0.1, but accounts for IDA behavior
-                    for idx, val in enumerate(zc_check):
-                        # If we're near the root and it was previously positive (inactive),
-                        # then this is a falling edge crossing
-                        if abs(val) < zc_tolerance and not cond_active_prev[idx]:
-                            triggered_indices.append(idx)
-                        # Alternatively, if the sign actually flipped to negative
-                        elif (val < 0) and not cond_active_prev[idx]:
-                            triggered_indices.append(idx)
-                    if verbose:
-                        print(f"      Zero-crossing values: {zc_check}")
-                        print(f"      Triggered indices (tolerance={zc_tolerance}): {triggered_indices}")
+                # Evaluate zero-crossing functions
+                zc_vals = self.eval_zc(t_curr, x_curr, z_curr)
+                cond_active_curr = (zc_vals < 0)
                 
-                if verbose:
-                    print(f"      cond_active_prev (before event): {cond_active_prev}")
-                
-                # Check for event frequency violation BEFORE processing events
-                if min_event_delta is not None and last_event_time > -np.inf:
+                # Check for event frequency violation
+                if min_event_delta is not None:
                     time_since_last = t_curr - last_event_time
-                    if time_since_last < min_event_delta:
+                    if time_since_last < min_event_delta and last_event_time > -np.inf:
                         if verbose:
                             print(f"    Event frequency threshold violated!")
                             print(f"    Time since last event: {time_since_last:.6e} < {min_event_delta:.6e}")
@@ -1520,35 +1737,24 @@ class DAESolver:
                         early_termination = True
                         break
                 
-                event_occurred = False
-                
-                # Process Triggered Events
-                # Capture the "Pre-Event" state ONCE for this time step.
-                # This ensures all simultaneous events see the un-modified state 
-                # entering the event point (order-independent behavior).
-                x_frozen_pre = x_curr.copy()
-                z_frozen_pre = z_curr.copy()
-                
-                for i in triggered_indices:
-                    # Check direction: We only want falling edge (False -> True)
-                    # i.e., previously Positive (False), now Negative/Zero (True)
-                    if not cond_active_prev[i]:
-                        event_occurred = True
-                        
+                # Find which event(s) triggered (falling edge: False -> True)
+                for i in range(self.n_events):
+                    if not cond_active_prev[i] and cond_active_curr[i]:
+                        # Event i became active
                         if verbose:
                             print(f"    Event {i} triggered: {self.when_clauses[i]['condition']}")
                         
-                        # Apply reinitialization using the FROZEN pre-state
-                        # This prevents Event B from reacting to Event A's immediate changes
-                        # All simultaneous events see the same pre-event state
-                        x_new, z_new = self._apply_reinit(
-                            i, t_curr, x_curr, z_curr, x_frozen_pre, z_frozen_pre
-                        )
+                        # Store pre-event values for prev() operator
+                        x_pre = x_curr.copy()
+                        z_pre = z_curr.copy()
                         
-                        # Track what changed (compare against frozen pre-state)
+                        # Apply reinitialization
+                        x_new, z_new = self._apply_reinit(i, t_curr, x_curr, z_curr, x_pre, z_pre)
+                        
+                        # Track what changed
                         var_name = self.event_reinit_var_names[i]
                         var_type, var_idx = self.event_reinit_vars[i]
-                        old_val = x_frozen_pre[var_idx] if var_type == 'state' else z_frozen_pre[var_idx]
+                        old_val = x_pre[var_idx] if var_type == 'state' else z_pre[var_idx]
                         new_val = x_new[var_idx] if var_type == 'state' else z_new[var_idx]
                         
                         event_times.append(t_curr)
@@ -1558,32 +1764,18 @@ class DAESolver:
                         if verbose:
                             print(f"      Reinitialized {var_name}: {old_val:.6e} -> {new_val:.6e}")
                         
-                        # Update current state (cumulative updates for simultaneous events)
+                        # Update current state
                         x_curr = x_new
                         z_curr = z_new
+                        y_curr = np.concatenate([x_curr, z_curr])
+                        
+                        # Recompute derivatives after reinitialization
+                        f_new = self.eval_f(t_curr, x_curr, z_curr)
+                        yp_curr = np.concatenate([f_new, np.zeros(len(z_curr))])
                 
-                # -----------------------------------------------------------
-                # FIX 2 & 3: Correct Post-Event State Update
-                # -----------------------------------------------------------
-                if event_occurred:
-                    last_event_time = t_curr
-                    
-                    # 1. Update y_curr for the solver
-                    y_curr = np.concatenate([x_curr, z_curr])
-                    
-                    # 2. Update derivative guess
-                    f_new = self.eval_f(t_curr, x_curr, z_curr)
-                    yp_curr = np.concatenate([f_new, np.zeros(len(z_curr))])
-                    
-                    # 3. CRITICAL: Re-evaluate ALL event conditions at the NEW state.
-                    # This ensures 'cond_active_prev' is correct for the start 
-                    # of the next continuous segment.
-                    zc_post = self.eval_zc(t_curr, x_curr, z_curr)
-                    cond_active_prev = (zc_post < 0)
-                    
-                    if verbose:
-                        print(f"      Re-init complete. New condition states: {cond_active_prev}")
-                
+                # Update boolean state memory
+                cond_active_prev = cond_active_curr.copy()
+                last_event_time = t_curr
                 
             elif sol.flag == 0:  # Success - reached t_end
                 if verbose:
