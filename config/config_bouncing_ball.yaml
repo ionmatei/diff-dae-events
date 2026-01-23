@@ -3,7 +3,7 @@ dae_solver:
   rtol: 0.0001
   start_time: 0.0
   stop_time: 3.0
-  ncp: 1000
+  ncp: 200
   dae_specification_file: dae_examples/dae_specification_bouncing_ball.json
   
 optimizer:

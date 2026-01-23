@@ -20,7 +20,7 @@ where y = [x, z] combines differential and algebraic variables.
 import json
 import numpy as np
 from scikits.odes.dae import dae
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, NamedTuple, Optional
 import re
 
 try:
@@ -32,6 +32,36 @@ except ImportError:
     JAX_AVAILABLE = False
     jnp = np
     print("Warning: JAX not available. Vectorized operations will use numpy loops.")
+
+
+class TrajectorySegment(NamedTuple):
+    """A continuous run of the DAE between two events."""
+    t: np.ndarray      # Shape (N,)
+    x: np.ndarray      # Shape (N, n_states)
+    z: np.ndarray      # Shape (N, n_alg)
+    xp: np.ndarray     # Shape (N, n_states) - Derivative (Needed for Hermite Interp)
+
+class EventInfo(NamedTuple):
+    """Explicit capture of the discontinuity."""
+    t_event: float           # tau
+    event_idx: int           # Which condition triggered
+    
+    # State immediately BEFORE reinit (x-)
+    x_pre: np.ndarray
+    z_pre: np.ndarray
+    
+    # State immediately AFTER reinit (x+)
+    x_post: np.ndarray
+    z_post: np.ndarray
+    
+    # Sensitivity matrices for the jump (Optional, but good to store if calculated)
+    # J_x = d(x+)/d(x-)
+    # J_p = d(x+)/d(p)
+
+class AugmentedSolution(NamedTuple):
+    """The full output required by the Adjoint Optimizer."""
+    segments: List[TrajectorySegment]
+    events: List[EventInfo]
 
 
 class DAESolver:
@@ -1476,6 +1506,19 @@ class DAESolver:
                 z_curr = y_curr[n_states:]
                 
                 # -----------------------------------------------------------
+                # FIX: Check for "Zeno" behavior (consecutive events without flow)
+                # -----------------------------------------------------------
+                # If the solver returned only 1 or 2 points (start + event point),
+                # it means there was essentially no continuous evolution between events.
+                # len(sol.values.t) <= 2 usually implies: [t_prev_event, t_curr_event]
+                if len(sol.values.t) <= 2 and last_event_time > -np.inf:
+                    if verbose:
+                        print(f"    Consecutive events detected without intermediate samples!")
+                        print(f"    Terminating simulation early at t={t_curr:.6f} to prevent Zeno bottleneck.")
+                    early_termination = True
+                    break
+
+                # -----------------------------------------------------------
                 # FIX 1: Use IDA's root info instead of manual 'abs < 0.1' check
                 # -----------------------------------------------------------
                 # sol.roots.val is usually an array of integers (1, -1, 0)
@@ -1636,6 +1679,314 @@ class DAESolver:
         }
         
         return result
+
+    def solve_augmented(self, 
+                        t_span: Tuple[float, float],
+                        rtol: float = 1e-6, 
+                        atol: float = 1e-8,
+                        ncp: int = None, # Added ncp to derive max_step
+                        **kwargs) -> AugmentedSolution:
+        """
+        Solves DAE and returns the 'Natural Grid' trajectory split by events.
+        This format is required for Discrete Adjoint Optimization.
+        
+        Args:
+            ncp: If provided, used to set the maximum step size (max_step) 
+                 ensuring segments have sufficient density for plotting/analysis.
+                 max_step = (t_end - t_start) / ncp
+        """
+        t_curr, t_end = t_span
+        
+        # Determine max_step if ncp is provided
+        max_step = np.inf
+        if ncp:
+            max_step = (t_end - t_curr) / float(ncp)
+        
+        # 1. Initialize State
+        y_curr = np.concatenate([self.x0, self.z0])
+        f0 = self.eval_f(t_curr, self.x0, self.z0)
+        yp_curr = np.concatenate([f0, np.zeros(len(self.z0))])
+        
+        # Initialize event tracking condition
+        # We only trigger events when condition goes False -> True (Falling edge of zc)
+        zc_vals = self.eval_zc(t_curr, self.x0, self.z0)
+        cond_active_prev = (zc_vals < 0)
+
+        # 2. Setup Loop Storage
+        segments = []
+        events = []
+        
+        # Current Segment Buffers
+        cur_t = [t_curr]
+        cur_x = [self.x0]
+        cur_z = [self.z0]
+        cur_xp = [f0] # Store x_dot for accurate interpolation later
+        
+        # 3. Configure Solver
+        n_total = len(y_curr)
+        n_states = len(self.state_names)
+        algvar_indices = np.arange(n_states, n_total)
+
+        # Initialize IDA wrapper
+        # Note: We do NOT rely on solver internal max_step options as they can be unreliable/variable across versions.
+        # We enforce density by controlling the integration horizon in the loop.
+        solver = dae(
+            'ida',
+            self.residual_ida,
+            rtol=rtol, atol=atol,
+            algebraic_vars_idx=algvar_indices,
+            compute_initcond='yp0',
+            # Event detection
+            rootfn=self._root_fn_wrapper if self.n_events > 0 else None,
+            nr_rootfns=self.n_events,
+            **kwargs
+        )
+        
+        # Initialize the internal memory of IDA
+        solver.init_step(t_curr, y_curr, yp_curr)
+
+        max_events = 1000 # Safety break
+        event_count = 0
+
+        while t_curr < t_end:
+            # ----------------------------------------------------------------
+            # CRITICAL: Control Step Size via Horizon
+            # ----------------------------------------------------------------
+            # If we just say solver.step(t_end), IDA takes huge steps.
+            # We urge it to return sooner by setting a closer horizon.
+            # solver.step(tout) integrates toward tout, but stops after one internal step.
+            # However, if that internal step is huge, we still miss points.
+            # BETTER: We don't force 'step(tout)' to be the end.
+            # But wait, 'step(tout)' usually means "take one step towards tout". 
+            # It DOES NOT mean "stop exactly at tout" unless we use 'run(tout)'.
+            # BUT, changing tout *guides* the heuristic max step size in some solvers.
+            
+            # Actually, to guarantee points at least every max_step, we should check:
+            # If the solver takes a huge step, we can't prevent it easily without options.
+            # scikits.odes doesn't easily expose 'max_step'.
+            
+            # ALTERNATIVE: Use solver.step(t_end) but checking the result.
+            # If result t_new is too far, that's bad.
+            
+            # Let's try passing 'max_step' to the constructor again but verified?
+            # No, 'max_step_size' was ignored.
+            
+            # Let's try controlling the upper bound of integration time passed to step.
+            # If we say step(t_curr + max_step), it CANNOT go past that.
+            # This effectively limits the step size returned.
+            
+            next_target = min(t_end, t_curr + max_step)
+            
+            # scikits.odes syntax for step: returns (flag, values, ...)
+            step_result = solver.step(next_target)
+            
+            flag = int(step_result.flag)
+            t_new = step_result.values.t
+            y_new = step_result.values.y
+            yp_new = step_result.values.ydot
+
+            # Extract state
+            x_new = y_new[:n_states]
+            z_new = y_new[n_states:]
+            xp_new = yp_new[:n_states]
+
+            # ----------------------------------------------------------------
+            # CASE A: Event Detected (Flag 2)
+            # ----------------------------------------------------------------
+            if flag == 2:
+
+                # 1. Capture the exact Event Time (tau)
+                tau = t_new
+                
+                # 2. Identify Event Candidates
+                triggered_candidates = []
+                
+                # Try to find roots in the return object first (if it has val/t etc)
+                # Also check solver.roots.val legacy location
+                if hasattr(solver, 'roots') and hasattr(solver.roots, 'val'):
+                     triggered_candidates = [i for i, v in enumerate(solver.roots.val) if v != 0]
+                
+                # Fallback: check zero crossings manually if IDA info is missing or ambiguous
+                if not triggered_candidates:
+                     zc = self.eval_zc(tau, x_new, z_new)
+                     triggered_candidates = [i for i, v in enumerate(zc) if abs(v) < 1e-3]
+                
+                # 3. Filter Candidates by Direction (Falling Edge Only)
+                # We only want to trigger if we were NOT active before (Positive zc)
+                # and are now Active (Negative zc, or crossing 0).
+                real_events = []
+                for idx in triggered_candidates:
+                    if not cond_active_prev[idx]:
+                        real_events.append(idx)
+                
+                if real_events:
+                    # Handle Primary Event (Simultaneous handling could be added, prioritizing first for now)
+                    event_idx = real_events[0] 
+                    event_count += 1
+                    
+                    if event_count > max_events:
+                        print(f"Warning: Maximum event count ({max_events}) reached. Terminating.")
+                        break
+
+                    # ----------------------------------------------------------------
+                    # FIX: Zeno Clamping (Consecutive events without intermediate samples)
+                    # ----------------------------------------------------------------
+                    # If len(cur_t) <= 2, it means we have [start_time] or [start_time, event_time]
+                    # with NO intermediate solver steps.
+                    # This implies the event happened immediately or after a single (possibly tiny) step.
+                    # If we had a previous event, this counts as "consecutive events without samples".
+                    if len(cur_t) <= 2 and len(events) > 0:
+                        print(f"Warning: Zeno barrier detected (Event triggered immediately after previous event).")
+                        print(f"  Terminating simulation at t={tau:.6f} to prevent infinite loop.")
+                        
+                        # We must finalize the current segment and return
+                        # Add the event point to close the segment if not already added
+                        # (If len is 2, the second point might be tau, or close to it? 
+                        #  Actually cur_t was appeneded via cur_t.append(tau) further down?
+                        #  No, we are inside 'if flag == 2'. cur_t currently has partial steps?
+                        #  Let's check logic above: cur_t initialized at loop start.
+                        #  If flag=2, we haven't appended tau yet.)
+                        
+                        cur_t.append(tau)
+                        cur_x.append(x_new)
+                        cur_z.append(z_new)
+                        cur_xp.append(xp_new)
+                        
+                        # Add partial segment
+                        segments.append(TrajectorySegment(
+                            np.array(cur_t), np.array(cur_x), np.array(cur_z), np.array(cur_xp)
+                        ))
+                        
+                        # Return current solution (truncated)
+                        return AugmentedSolution(segments, events)
+
+
+                    # 4. Finalize Previous Segment
+                    # Add the event node (x-) to the current segment end
+                    # Only add if we moved forward in time
+                    if len(cur_t) == 0 or tau > cur_t[-1] + 1e-14:
+                        cur_t.append(tau)
+                        cur_x.append(x_new)
+                        cur_z.append(z_new)
+                        cur_xp.append(xp_new)
+                    else:
+                        # We are at the same time point (or extremely close), override the last point
+                        # to ensure exact event time capture
+                        cur_t[-1] = tau
+                        cur_x[-1] = x_new
+                        cur_z[-1] = z_new
+                        cur_xp[-1] = xp_new
+                    
+                    # Store segment
+                    segments.append(TrajectorySegment(
+                        np.array(cur_t), np.array(cur_x), np.array(cur_z), np.array(cur_xp)
+                    ))
+                    
+                    # 5. Perform Reinitialization (Jump)
+                    # We need x- (x_new) and x+ (reinitialized)
+                    x_pre, z_pre = x_new.copy(), z_new.copy()
+                    
+                    # Apply your existing logic
+                    x_post, z_post = self._apply_reinit(
+                        event_idx, tau, x_new, z_new, x_pre, z_pre
+                    )
+                    
+                    # 6. Store Event Info
+                    events.append(EventInfo(
+                        t_event=tau,
+                        event_idx=event_idx,
+                        x_pre=x_pre, z_pre=z_pre,
+                        x_post=x_post, z_post=z_post
+                    ))
+                    
+                    # 7. Update State & Reset Solver
+                    t_curr = tau
+                    y_curr = np.concatenate([x_post, z_post])
+                    
+                    # Re-evaluate derivatives f(x+, z+) consistent with new state
+                    f_post = self.eval_f(t_curr, x_post, z_post)
+                    yp_curr = np.concatenate([f_post, np.zeros(len(z_post))])
+                    
+                    # Update active condition map using POST-EVENT state
+                    # This prevents immediate re-triggering if x_post is still near boundary
+                    zc_post = self.eval_zc(t_curr, x_post, z_post)
+                    cond_active_prev = (zc_post < 0)
+                    
+                    # Restart solver
+                    solver.init_step(t_curr, y_curr, yp_curr)
+                    
+                    # Start buffers for new segment
+                    cur_t = [t_curr]
+                    cur_x = [x_post]
+                    cur_z = [z_post]
+                    cur_xp = [f_post]
+                    
+                else:
+                    # Flag 2 but no valid failing edge (Rising edge or spurious)
+                    # Treat as a step, update state, but do not reinit
+                    # We accept the point
+                    # Treat as a step, update state, but do not reinit
+                    # We accept the point if unique
+                    if len(cur_t) == 0 or tau > cur_t[-1] + 1e-14:
+                        cur_t.append(tau)
+                        cur_x.append(x_new)
+                        cur_z.append(z_new)
+                        cur_xp.append(xp_new)
+                        t_curr = tau
+                    
+                    # Update active conditions based on current state (so we correctly track being 'active')
+                    # e.g. if we just crossed to positive, cond_active_prev becomes False
+                    zc_new = self.eval_zc(t_curr, x_new, z_new)
+                    cond_active_prev = (zc_new < 0)
+                    
+                    # Note: We do NOT call init_step here, we let the solver continue from this point.
+                    # IDA (scikits.odes) state should be valid to continue.
+
+            # ----------------------------------------------------------------
+            # CASE B: Standard Step (Flag 0)
+            # ----------------------------------------------------------------
+            elif flag == 0:
+                # Append to current buffers if time advanced
+                if t_new > cur_t[-1] + 1e-14:
+                    cur_t.append(t_new)
+                    cur_x.append(x_new)
+                    cur_z.append(z_new)
+                    cur_xp.append(xp_new)
+                    t_curr = t_new
+                
+                # Check target stop condition
+                if t_curr >= t_end:
+                    break
+                
+                # Check for zero crossings that might have been missed or changed state
+                # (Ideally redundant if root finding works, but good for tracking)
+                # But calculating zc every step might be expensive. 
+                # We trust IDA to stop at roots.
+                # However, we MUST keep cond_active_prev updated?
+                # Actually, if no root found, state shouldn't have changed crossing.
+                # But strictly, we should update it if we want to be safe, 
+                # OR we assume it stays same until flag 2.
+                # Let's assume it stays same to save compute.
+
+
+                t_curr = t_new
+                
+                # Append to current buffers
+                cur_t.append(t_new)
+                cur_x.append(x_new)
+                cur_z.append(z_new)
+                cur_xp.append(xp_new)
+                
+            else:
+                print(f"Solver Error: Flag {flag}")
+                break
+
+        # Finalize the last segment
+        segments.append(TrajectorySegment(
+            np.array(cur_t), np.array(cur_x), np.array(cur_z), np.array(cur_xp)
+        ))
+        
+        return AugmentedSolution(segments, events)
 
 
 
