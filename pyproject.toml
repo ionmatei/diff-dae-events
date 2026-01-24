@@ -3,10 +3,11 @@ name = "dae-sensitivity-free-optimization"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "diffrax>=0.7.0",
     "dotenv>=0.9.9",
+    "equinox>=0.13.2",
     "fmpy>=0.3.26",
     "ipykernel>=7.1.0",
     "jax[cuda12]>=0.8.1",
@@ -15,4 +16,6 @@ dependencies = [
     "ompython>=4.0.0",
     "pandas>=2.3.3",
     "pyyaml>=6.0.3",
+    "scikits-odes>=3.1.1",
+    "torchdiffeq>=0.2.5",
 ]

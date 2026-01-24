@@ -2,30 +2,32 @@ dae_solver:
   atol: 0.0001
   rtol: 0.0001
   start_time: 0.0
-  stop_time: 3.0
-  ncp: 200
+  stop_time: 2.0
+  ncp: 500
   dae_specification_file: dae_examples/dae_specification_bouncing_ball.json
   
 optimizer:
   discretization_method: bdf6  # backward_euler, trapezoidal, bdf2, bdf3, bdf4, bdf5, bdf6
   algorithm:
-    type: "SGD"  # "SGD" or "ADAM"
+    type: "ADAM"  # "SGD" or "ADAM"
     params:
-      step_size: 0.003
+      step_size: 0.01
       # Adam-specific parameters (ignored for SGD):
       beta1: 0.9
       beta2: 0.999
       epsilon: 1.0e-8
+  blend_sharpness: 100
+  prediction_method: sigmoid  # 'sigmoid' for sigmoid blending, 'linear' for linear interpolation (matches PyTorch)
+  max_segments: 3
+  max_points_per_segment: 500
   opt_params:
     - g
     - e
   loss_type: mean
-  max_iterations: 500
-  tol: 0.001
-  print_every: 10
+  max_iterations: 20
+  tol: 0.00001
+  print_every: 1
   device: cpu
   gpu_memory_fraction: 0.9
-  sequential_fallback:
-    enable: False
-    threshold: 500
+
 
