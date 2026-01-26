@@ -84,7 +84,7 @@ def run_bouncing_ball_test(config: dict):
 
     # Extract reference data at uniform times
     t_duration = t_span[1] - t_span[0]
-    n_targets = max(20, int(20 * t_duration))
+    n_targets = max(300, int(300 * t_duration))
     t_target = np.linspace(t_span[0] + 0.1, t_span[1] - 0.1, n_targets)
 
     # Interpolate true trajectory at target times
@@ -226,7 +226,7 @@ def run_bouncing_ball_test(config: dict):
         ax = axes[0, 0]
         ax.plot(times_np, h_np, 'b-', linewidth=2, label='True')
         ax.plot(times_opt_np, h_opt_np, 'r--', linewidth=2, label='Optimized')
-        ax.scatter(t_target, y_target, c='k', s=20, zorder=5, label='Target points')
+        # ax.scatter(t_target, y_target, c='k', s=20, zorder=5, label='Target points')
         ax.set_xlabel('Time [s]')
         ax.set_ylabel('Height h [m]')
         ax.set_title('Height Trajectory')

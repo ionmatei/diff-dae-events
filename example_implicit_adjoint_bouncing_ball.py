@@ -94,24 +94,23 @@ def run_bouncing_ball_test(config: dict):
     print(f"  Number of segments: {len(aug_sol_true.segments)}")
     print(f"  Number of events: {len(aug_sol_true.events)}")
 
-    # Extract reference data at uniform times
-    # IMPORTANT: Avoid times very close to events to prevent interpolation issues
-    # Scale n_targets with time horizon: ~20 targets per second
-    t_duration = t_span[1] - t_span[0]
-    n_targets = max(20, int(20 * t_duration))
-    t_target = np.linspace(t_span[0] + 0.1, t_span[1] - 0.1, n_targets)
-
-    # Create a temporary optimizer with true parameters to generate targets
-    optimizer_true = DAEOptimizerImplicitAdjoint(
-        dae_data=dae_data,
-        optimize_params=opt_cfg['opt_params'],
-        verbose=False,
-        blend_sharpness=opt_cfg.get('blend_sharpness', 100.0),
-        max_segments=opt_cfg.get('max_segments', 20),
-        max_points_per_seg=opt_cfg.get('max_points_per_segment', 500),
-        prediction_method=opt_cfg.get('prediction_method', 'sigmoid')
-    )
-    y_target = optimizer_true.predict_outputs(aug_sol_true, t_target)
+    # Extract reference data by concatenating segments directly
+    # This avoids interpolation and uses the exact points from the solver
+    t_target_list = []
+    y_target_list = []
+    
+    # Identify output indices (assuming standard state indices for now)
+    # The bouncing ball 'h' and 'v' are states 0 and 1.
+    
+    for seg in aug_sol_true.segments:
+        t_target_list.append(seg.t)
+        # seg.x is (n_points, n_states), output is usually just states here
+        y_target_list.append(seg.x)
+        
+    t_target = np.concatenate(t_target_list)
+    y_target = np.concatenate(y_target_list)
+    
+    n_targets = len(t_target)
 
     # Add small noise to ground truth
     noise_std = 0.0
@@ -137,8 +136,8 @@ def run_bouncing_ball_test(config: dict):
     # to maintain the integrity of the specific test case unless specified otherwise.
     g_true_val = p_true['g']
     e_true_val = p_true['e']
-    g_init = g_true_val * 0.9  # 10% perturbation
-    e_init = e_true_val * 0.9   # 10% perturbation
+    g_init = g_true_val * 0.8  # 10% perturbation
+    e_init = e_true_val * 0.8   # 10% perturbation
 
     # Only perturb parameters that are in the optimization list
     optimize_params = opt_cfg['opt_params']
@@ -147,9 +146,9 @@ def run_bouncing_ball_test(config: dict):
         p_name = p['name']
         if p_name in optimize_params:
             if p_name == 'g':
-                p['value'] = g_true_val * 0.9  # 10% perturbation
+                p['value'] = g_true_val * 0.8  # 10% perturbation
             elif p_name == 'e':
-                p['value'] = e_true_val * 0.9   # 10% perturbation
+                p['value'] = e_true_val * 0.8   # 10% perturbation
                 
     # Print status
     for p_name in ['g', 'e']:
@@ -194,7 +193,9 @@ def run_bouncing_ball_test(config: dict):
         ncp=ncp,
         print_every=opt_cfg.get('print_every', 10),
         algorithm=algorithm_type,
-        blend_sharpness=opt_cfg.get('blend_sharpness', 100.0)
+        blend_sharpness=opt_cfg.get('blend_sharpness', 100.0),
+        max_segments=opt_cfg.get('max_segments', 20),
+        max_points_per_seg=opt_cfg.get('max_points_per_segment', 500)
     )
 
     # =========================================================================
@@ -281,7 +282,7 @@ def run_bouncing_ball_test(config: dict):
         # Note: y_target uses sigmoid blending for smooth optimization gradients,
         # so we interpolate directly for visualization to match the trajectory lines
         h_target_interp = np.interp(t_target, t_true_all, h_true_all)
-        ax.scatter(t_target, h_target_interp, c='k', s=20, zorder=5, label='Target times')
+        # ax.scatter(t_target, h_target_interp, c='k', s=20, zorder=5, label='Target times')
         ax.set_xlabel('Time [s]')
         ax.set_ylabel('Height h [m]')
         ax.set_title('Height Trajectory')

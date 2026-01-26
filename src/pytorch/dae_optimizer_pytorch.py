@@ -130,7 +130,9 @@ class BouncingBallModel(nn.Module):
                 tt = torch.linspace(current_t_val, event_t_val, self.ncp, dtype=torch.float64)
 
                 if len(tt) > 1:
-                    sol = odeint(self, state, tt, method='midpoint')
+                    sol = odeint(self, state, tt, atol=1e-4, rtol=1e-4, 
+                    method='midpoint'
+                    )
                     all_times.append(tt[1:])
                     all_h.append(sol[0][1:].reshape(-1))
                     all_v.append(sol[1][1:].reshape(-1))
@@ -145,7 +147,7 @@ class BouncingBallModel(nn.Module):
                 if current_t_val < t_end:
                     tt = torch.linspace(float(current_t), t_end, self.ncp, dtype=torch.float64)
                     if len(tt) > 1:
-                        sol = odeint(self, state, tt, method='midpoint')
+                        sol = odeint(self, state, tt, atol=1e-4, rtol=1e-4, method='midpoint')
                         all_times.append(tt[1:])
                         all_h.append(sol[0][1:].reshape(-1))
                         all_v.append(sol[1][1:].reshape(-1))

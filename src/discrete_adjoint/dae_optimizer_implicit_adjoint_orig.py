@@ -78,78 +78,6 @@ def compile_equations_to_jax(eqn_strings, state_names, alg_names, param_names, e
 # 2. Standalone JIT Kernels
 # =============================================================================
 
-@partial(jit, static_argnames=['f_fn', 'n_states', 'n_alg', 'optimize_indices'])
-def backward_scan_kernel_implicit(
-    lambda_init, grad_p_init, 
-    t_kp1_seq, t_k_seq, y_kp1_seq, y_k_seq, dL_k_seq,
-    p_all_default, optimize_indices, n_states, n_alg, f_fn
-):
-    p_opt_initial = p_all_default[jnp.array(optimize_indices)]
-
-    def scan_step(carry, inputs):
-        lambda_kp1, grad_p_acc = carry
-        t_kp1, t_k, y_kp1, y_k, dL_k = inputs
-        h = t_kp1 - t_k
-        
-        x_k = y_k[:n_states]
-        x_kp1 = y_kp1[:n_states]
-        z_k = y_k[n_states:] if n_alg > 0 else jnp.array([])
-        
-        # 1. Compute Jacobians df/dx (State)
-        def f_wrapper_x(x, t_val): return f_fn(t_val, x, z_k, p_all_default)
-        J_k = jax.jacfwd(f_wrapper_x)(x_k, t_k)
-        J_kp1 = jax.jacfwd(f_wrapper_x)(x_kp1, t_kp1)
-        
-        # 2. Implicit Adjoint Solve
-        # We need to compute: lambda_mid = (I - h/2 * J_{k+1}^T)^(-1) * lambda_{k+1}
-        # This projects the adjoint through the implicit part of the trapezoidal step.
-        
-        I = jnp.eye(n_states)
-        factor = 0.5 * h
-        
-        # Matrix A = (I - h/2 * J_{k+1})^T = I - h/2 * J_{k+1}^T
-        A_matrix = I - factor * J_kp1.T
-        
-        # Solve A * lambda_mid = lambda_kp1
-        # For small h, this is well-conditioned. For stiff systems, this is crucial.
-        lambda_mid = jnp.linalg.solve(A_matrix, lambda_kp1)
-        
-        # 3. Update Adjoint to current step
-        # lambda_k = (I + h/2 * J_k)^T * lambda_mid + forcing
-        lambda_k = (I + factor * J_k.T) @ lambda_mid + dL_k[:n_states]
-
-        # 4. Parameter Gradient (dL/dp)
-        # CRITICAL FIX: Use lambda_mid, NOT lambda_kp1. 
-        # The parameter sensitivity passes through the same implicit inversion.
-        def f_wrapper_p(p_subset):
-            p_full = p_all_default.at[jnp.array(optimize_indices)].set(p_subset)
-            f_k = f_fn(t_k, x_k, z_k, p_full)
-            f_kp1 = f_fn(t_kp1, x_kp1, z_k, p_full)
-            # Residual sensitivity dR/dp = -h/2 * (df_k/dp + df_kp1/dp)
-            return -(h / 2.0) * (f_k + f_kp1)
-
-        dr_dp = jax.jacfwd(f_wrapper_p)(p_opt_initial)
-        
-        # Accumulate: grad += lambda_mid^T @ (dR/dp)
-        # Note the sign: Adjoint rule typically is -lambda^T * R_p
-        # Since dr_dp above includes the negative sign from the residual definition,
-        # we subtract: grad - (lambda @ dr_dp).
-        # Wait, dr_dp above is defined as negative. 
-        # Residual: x_new - x - step = 0. dR/dp = -dstep/dp.
-        # Gradient: - lambda^T * dR/dp = - lambda^T * (-dstep/dp) = lambda^T * dstep/dp.
-        # My dr_dp function returns -dstep/dp. 
-        # So we subtract: grad_acc - (lambda_mid @ dr_dp)
-        
-        grad_p_new = grad_p_acc - (dr_dp.T @ lambda_mid)
-
-        return (lambda_k, grad_p_new), lambda_k
-
-    (lambda_final, grad_p_final), _ = lax.scan(
-        scan_step,
-        (lambda_init, grad_p_init),
-        (t_kp1_seq, t_k_seq, y_kp1_seq, y_k_seq, dL_k_seq)
-    )
-    return lambda_final, grad_p_final
 
 
 @partial(jit, static_argnames=['f_fn', 'n_states', 'n_alg', 'optimize_indices'])
@@ -297,6 +225,141 @@ def predict_trajectory_kernel(segments_t, segments_x, segments_z, events_tau, ta
     return vmap(predict_single_time)(target_times)
 
 
+# --- Linear Interpolation Prediction Kernel (PyTorch-style) ---
+@partial(jit, static_argnames=['eval_h_fn', 'n_outputs'])
+def predict_trajectory_kernel_linear(segments_t, segments_x, segments_z, target_times, p_all, eval_h_fn, n_outputs):
+    """
+    Linear interpolation prediction kernel (matches PyTorch implementation).
+    No sigmoid blending - just concatenates all segments and interpolates.
+    """
+    # Concatenate all segments into single arrays
+    all_t = jnp.concatenate(segments_t)
+    all_x = jnp.concatenate(segments_x)
+
+    # Handle algebraic variables
+    if segments_z[0].size > 0:
+        all_z = jnp.concatenate(segments_z)
+    else:
+        all_z = jnp.zeros((len(all_t), 0))
+
+    def predict_single_time(t_q):
+        # Find interpolation index
+        idx = jnp.searchsorted(all_t, t_q, side='right') - 1
+        idx = jnp.clip(idx, 0, len(all_t) - 2)
+
+        t0, t1 = all_t[idx], all_t[idx + 1]
+        dt = t1 - t0
+        dt_safe = jnp.where(jnp.abs(dt) < 1e-12, 1e-12, dt)
+        s = jnp.clip((t_q - t0) / dt_safe, 0.0, 1.0)
+
+        x_i = all_x[idx] * (1 - s) + all_x[idx + 1] * s
+        z_i = all_z[idx] * (1 - s) + all_z[idx + 1] * s if all_z.shape[1] > 0 else jnp.array([])
+
+        return eval_h_fn(t_q, x_i, z_i, p_all)
+
+    return vmap(predict_single_time)(target_times)
+
+
+# --- Padded Linear Interpolation Prediction Kernel (PyTorch-style) ---
+@partial(jit, static_argnames=['eval_h_fn', 'n_outputs', 'max_segments', 'max_points', 'n_alg'])
+def predict_trajectory_kernel_padded_linear(
+    t_start, pad_tau, pad_x, pad_z, seg_mask,
+    target_times, p_all, eval_h_fn, n_outputs,
+    max_segments, max_points, n_alg
+):
+    """
+    JIT-stable linear interpolation prediction kernel (matches PyTorch implementation).
+    Time grid is constructed dynamically from pad_tau to ensure differentiability w.r.t. event times.
+
+    Args:
+        t_start: Start time of simulation
+        pad_tau: (max_segments,) - padded event times (ends of segments)
+        pad_x: (max_segments, max_points, n_states) - padded state arrays
+        pad_z: (max_segments, max_points, n_alg_padded) - padded algebraic arrays
+        seg_mask: (max_segments,) - 1.0 for valid segments, 0.0 for padding
+        target_times: (n_targets,) - query times
+        p_all: parameter vector
+        eval_h_fn: output function
+        n_outputs: number of outputs
+        max_segments: static max number of segments
+        max_points: static max points per segment
+        n_alg: number of algebraic variables
+    """
+    n_states = pad_x.shape[2]
+
+    # Dynamically construct time grid to preserve gradients w.r.t pad_tau
+    # Seg 0: t_start -> pad_tau[0]
+    # Seg i: pad_tau[i-1] -> pad_tau[i]
+    starts = jnp.concatenate([jnp.array([t_start]), pad_tau[:-1]])
+    ends = pad_tau
+    
+    # Grid 0..1 per segment: shape (max_points,)
+    unit_grid = jnp.linspace(0.0, 1.0, max_points)
+    
+    # Broadcast to (max_segments, max_points)
+    # dynamic_t[i, k] = start[i] + unit_grid[k] * (end[i] - start[i])
+    dynamic_t = starts[:, None] + (ends - starts)[:, None] * unit_grid[None, :]
+
+    # Build concatenated timeline from all valid segments
+    # Each segment contributes max_points entries
+    flat_t = dynamic_t.reshape(-1)  # (max_segments * max_points,)
+    flat_x = pad_x.reshape(-1, n_states)
+    
+    if n_alg > 0:
+        flat_z = pad_z.reshape(-1, pad_z.shape[2])
+    else:
+        # Dummy flat_z if n_alg is 0 (to allow indexing)
+        flat_z = jnp.zeros((flat_t.shape[0], 0))
+
+    # Create validity mask per point (expanded from segment mask)
+    point_mask = jnp.repeat(seg_mask, max_points)
+
+    def predict_single_time(t_q):
+        # Find which segment contains this time
+        # We iterate through segments and pick the LAST one that contains t_q
+        # This ensures we use POST-event values at boundaries (matching PyTorch behavior)
+
+        def find_in_segment(carry, seg_data):
+            result = carry
+            t_seg, x_seg, z_seg, is_valid = seg_data
+
+            t_start_seg, t_end_seg = t_seg[0], t_seg[-1]
+
+            # Check if t_q is in this segment's range
+            in_range = (t_q >= t_start_seg) & (t_q <= t_end_seg) & (is_valid > 0.5)
+
+            # Interpolation within segment
+            # Using searchsorted on the dynamic grid segment
+            idx = jnp.searchsorted(t_seg, t_q, side='right') - 1
+            idx = jnp.clip(idx, 0, max_points - 2)
+            t0, t1 = t_seg[idx], t_seg[idx + 1]
+            dt = t1 - t0
+            dt_safe = jnp.where(jnp.abs(dt) < 1e-12, 1e-12, dt)
+            s = jnp.clip((t_q - t0) / dt_safe, 0.0, 1.0)
+
+            x_i = x_seg[idx] * (1 - s) + x_seg[idx + 1] * s
+            z_i = z_seg[idx] * (1 - s) + z_seg[idx + 1] * s if n_alg > 0 else jnp.array([])
+            z_i = z_i[:n_alg] if n_alg > 0 else jnp.array([])
+
+            h_val = eval_h_fn(t_q, x_i, z_i, p_all)
+
+            # Update result if this segment contains the query time
+            # (overwrites previous matches, so we get the LAST matching segment)
+            new_result = jnp.where(in_range, h_val, result)
+
+            return new_result, None
+
+        init = jnp.zeros(n_outputs)
+        # Stack segment data for scan
+        seg_data = (dynamic_t, pad_x, pad_z, seg_mask)
+
+        result, _ = lax.scan(find_in_segment, init, seg_data)
+
+        return result
+
+    return vmap(predict_single_time)(target_times)
+
+
 # --- Padded Prediction Kernel for JIT stability ---
 @partial(jit, static_argnames=['eval_h_fn', 'n_outputs', 'max_segments', 'max_points', 'n_alg'])
 def predict_trajectory_kernel_padded(
@@ -373,11 +436,25 @@ def predict_trajectory_kernel_padded(
 
 class DAEOptimizerImplicitAdjoint:
     def __init__(self, dae_data: Dict, optimize_params: List[str], solver=None, verbose: bool = True,
-                 blend_sharpness: float = 100.0, max_segments: int = 20, max_points_per_seg: int = 500):
+                 blend_sharpness: float = 100.0, max_segments: int = 20, max_points_per_seg: int = 500,
+                 prediction_method: str = 'sigmoid'):
+        """
+        Args:
+            dae_data: DAE specification dictionary
+            optimize_params: List of parameter names to optimize
+            solver: Optional DAESolver instance
+            verbose: Print progress
+            blend_sharpness: Sigmoid blending sharpness (only used if prediction_method='sigmoid')
+            max_segments: Maximum number of segments for JIT stability
+            max_points_per_seg: Maximum points per segment for JIT stability
+            prediction_method: 'sigmoid' for sigmoid blending (original), 'linear' for linear
+                              interpolation (matches PyTorch implementation)
+        """
         self.dae_data = dae_data
         self.optimize_params = optimize_params
         self.verbose = verbose
         self.blend_sharpness = blend_sharpness
+        self.prediction_method = prediction_method.lower()
         self.solver = solver if solver else DAESolver(dae_data, verbose=verbose)
         self.param_names = [p['name'] for p in dae_data['parameters']]
         self.p_all = np.array([p['value'] for p in dae_data['parameters']])
@@ -392,6 +469,9 @@ class DAEOptimizerImplicitAdjoint:
         # Padding limits for JIT stability
         self.max_segments = max_segments
         self.max_points_per_seg = max_points_per_seg
+
+        if self.verbose:
+            print(f"  Prediction method: {self.prediction_method}")
 
         self._compile_jax_functions()
 
@@ -490,15 +570,16 @@ class DAEOptimizerImplicitAdjoint:
             pad_z[i, :, :] = z_interp
             seg_mask[i] = 1.0
 
-        # 2. Extract event times (pad with last event or infinity)
+        # 2. Extract event times (pad with t_end to ensure validity of subsequent masks)
+        # If we pad with last_event_time, the intervals become zero length
+        t_end = aug_sol.segments[-1].t[-1] if aug_sol.segments else 0.0
+        
         for i in range(min(len(aug_sol.events), self.max_segments)):
             pad_tau[i] = aug_sol.events[i].t_event
             
-        # Pad remaining event times
-        if len(aug_sol.events) > 0:
-            last_tau = aug_sol.events[-1].t_event
-            for i in range(len(aug_sol.events), self.max_segments):
-                pad_tau[i] = last_tau
+        # Pad remaining event times with t_end
+        for i in range(len(aug_sol.events), self.max_segments):
+            pad_tau[i] = t_end
 
         return (jnp.array(pad_t), jnp.array(pad_x), jnp.array(pad_z),
                 jnp.array(pad_tau), jnp.array(seg_mask))
@@ -511,11 +592,24 @@ class DAEOptimizerImplicitAdjoint:
         # Use padded representation for JIT stability
         pad_t, pad_x, pad_z, pad_tau, seg_mask = self._resample_trajectory(aug_sol)
 
-        y_pred = predict_trajectory_kernel_padded(
-            pad_t, pad_x, pad_z, pad_tau, seg_mask,
-            jnp.array(target_times), jnp.array(self.p_all), self._eval_h, self.n_outputs,
-            self.max_segments, self.max_points_per_seg, self.n_alg, blend_sharpness
-        )
+        if self.prediction_method == 'linear':
+            # Linear interpolation (matches PyTorch implementation)
+            # Use t_span[0] from the solution?
+            # aug_sol.segments[0].t[0] is the start time.
+            t_start = aug_sol.segments[0].t[0] if aug_sol.segments else 0.0
+            
+            y_pred = predict_trajectory_kernel_padded_linear(
+                t_start, pad_tau, pad_x, pad_z, seg_mask,
+                jnp.array(target_times), jnp.array(self.p_all), self._eval_h, self.n_outputs,
+                self.max_segments, self.max_points_per_seg, self.n_alg
+            )
+        else:
+            # Sigmoid blending (original method)
+            y_pred = predict_trajectory_kernel_padded(
+                pad_t, pad_x, pad_z, pad_tau, seg_mask,
+                jnp.array(target_times), jnp.array(self.p_all), self._eval_h, self.n_outputs,
+                self.max_segments, self.max_points_per_seg, self.n_alg, blend_sharpness
+            )
         return np.array(y_pred)
 
     @partial(jit, static_argnames=['self'])
@@ -534,7 +628,7 @@ class DAEOptimizerImplicitAdjoint:
     @partial(jit, static_argnames=['self'])
     def _compute_loss_and_grad_padded_jit(self, pad_t, pad_x, pad_z, pad_tau, seg_mask,
                                            target_times, target_outputs, p_all, blend_sharpness):
-        """JIT-stable loss and gradient computation with padded arrays."""
+        """JIT-stable loss and gradient computation with padded arrays (sigmoid blending)."""
         def loss_fn(aug_t, aug_x, aug_z, aug_tau):
             y_preds = predict_trajectory_kernel_padded(
                 aug_t, aug_x, aug_z, aug_tau, seg_mask,
@@ -546,6 +640,32 @@ class DAEOptimizerImplicitAdjoint:
         loss, vjp_fn = jax.vjp(loss_fn, pad_t, pad_x, pad_z, pad_tau)
         grads = vjp_fn(1.0)
         grad_t, grad_x, grad_z, grad_tau = grads
+        return loss, grad_x, grad_z, grad_tau
+
+    @partial(jit, static_argnames=['self'])
+    def _compute_loss_and_grad_padded_linear_jit(self, t_start, pad_tau, pad_x, pad_z, seg_mask,
+                                                  target_times, target_outputs, p_all):
+        """JIT-stable loss and gradient computation with linear interpolation (differentiable w.r.t tau)."""
+        def loss_fn(tau_arg, x_arg, z_arg):
+            y_preds = predict_trajectory_kernel_padded_linear(
+                t_start, tau_arg, x_arg, z_arg, seg_mask,
+                target_times, p_all, self._eval_h, self.n_outputs,
+                self.max_segments, self.max_points_per_seg, self.n_alg
+            )
+            return jnp.mean((y_preds - target_outputs)**2)
+
+        loss, vjp_fn = jax.vjp(loss_fn, pad_tau, pad_x, pad_z)
+        grads = vjp_fn(1.0)
+        grad_tau, grad_x, grad_z = grads
+        
+        # We don't compute gradient w.r.t explicit time grid anymore (it's implicit in tau)
+        # Return zeros for grad_t (unused placeholder) if needed, but our caller doesn't seem to use grad_t
+        # Wait, the caller loop:
+        # dL_x_pad = dL_dx_padded[i]
+        # It doesn't use dL_t_pad.
+        # But we need to return consistent signature with sigmoid version?
+        # Sigmoid version returns: loss, grad_x, grad_z, grad_tau
+        
         return loss, grad_x, grad_z, grad_tau
 
     def optimization_step(self, t_span, target_times, target_outputs, p_opt, ncp=200, blend_sharpness=None):
@@ -573,10 +693,19 @@ class DAEOptimizerImplicitAdjoint:
         p_all_jax = jnp.array(p_all_jax)
 
         # 3. Compute Loss & Forcing Terms (JIT Compiled with padding)
-        loss, dL_dx_padded, dL_dz_padded, dL_dtau_padded = self._compute_loss_and_grad_padded_jit(
-            pad_t, pad_x, pad_z, pad_tau, seg_mask,
-            jnp.array(target_times), jnp.array(target_outputs), p_all_jax, blend_sharpness
-        )
+        if self.prediction_method == 'linear':
+            # Linear interpolation (matches PyTorch implementation)
+            # Now differentiable w.r.t pad_tau
+            loss, dL_dx_padded, dL_dz_padded, dL_dtau_padded = self._compute_loss_and_grad_padded_linear_jit(
+                t_span[0], pad_tau, pad_x, pad_z, seg_mask,
+                jnp.array(target_times), jnp.array(target_outputs), p_all_jax
+            )
+        else:
+            # Sigmoid blending (original method)
+            loss, dL_dx_padded, dL_dz_padded, dL_dtau_padded = self._compute_loss_and_grad_padded_jit(
+                pad_t, pad_x, pad_z, pad_tau, seg_mask,
+                jnp.array(target_times), jnp.array(target_outputs), p_all_jax, blend_sharpness
+            )
 
         # 4. Backward Sweep (Hybrid: Loop Segments, Masked Kernels)
         grad_p_total = jnp.zeros(self.n_opt_params)

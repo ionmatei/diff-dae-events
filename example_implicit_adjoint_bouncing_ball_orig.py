@@ -55,7 +55,7 @@ def run_bouncing_ball_test(config: dict):
     
     # Delayed import to ensure JAX finds the correct platform env var
     from src.discrete_adjoint.dae_solver import DAESolver
-    from src.discrete_adjoint.dae_optimizer_implicit_adjoint_orig import DAEOptimizerImplicitAdjoint
+    from src.discrete_adjoint.dae_optimizer_implicit_adjoint import DAEOptimizerImplicitAdjoint
 
     # Extract config sections
     solver_cfg = config['dae_solver']
@@ -108,9 +108,16 @@ def run_bouncing_ball_test(config: dict):
         verbose=False,
         blend_sharpness=opt_cfg.get('blend_sharpness', 100.0),
         max_segments=opt_cfg.get('max_segments', 20),
-        max_points_per_seg=opt_cfg.get('max_points_per_segment', 500)
+        max_points_per_seg=opt_cfg.get('max_points_per_segment', 500),
+        prediction_method=opt_cfg.get('prediction_method', 'sigmoid')
     )
     y_target = optimizer_true.predict_outputs(aug_sol_true, t_target)
+
+    # Add small noise to ground truth
+    noise_std = 0.0
+    np.random.seed(42)
+    y_target += np.random.normal(0, noise_std, y_target.shape)
+    print(f"  Added Gaussian noise (std={noise_std}) to targets")
 
     print(f"  Target times: {n_targets} points from {t_target[0]:.2f} to {t_target[-1]:.2f}")
     print(f"  Event times: {[ev.t_event for ev in aug_sol_true.events]}")
@@ -130,17 +137,31 @@ def run_bouncing_ball_test(config: dict):
     # to maintain the integrity of the specific test case unless specified otherwise.
     g_true_val = p_true['g']
     e_true_val = p_true['e']
-    g_init = g_true_val * 0.8  # 15% perturbation
-    e_init = e_true_val * 0.8   # 20% perturbation
+    g_init = g_true_val * 0.9  # 10% perturbation
+    e_init = e_true_val * 0.9   # 10% perturbation
 
+    # Only perturb parameters that are in the optimization list
+    optimize_params = opt_cfg['opt_params']
+    
     for p in dae_data_init['parameters']:
-        if p['name'] == 'g':
-            p['value'] = g_init
-        if p['name'] == 'e':
-            p['value'] = e_init
+        p_name = p['name']
+        if p_name in optimize_params:
+            if p_name == 'g':
+                p['value'] = g_true_val * 0.9  # 10% perturbation
+            elif p_name == 'e':
+                p['value'] = e_true_val * 0.9   # 10% perturbation
+                
+    # Print status
+    for p_name in ['g', 'e']:
+        val_true = p_true[p_name]
+        # Find initialized value
+        val_init = next(p['value'] for p in dae_data_init['parameters'] if p['name'] == p_name)
+        is_opt = p_name in optimize_params
+        status = "PERTURBED" if is_opt else "FIXED (Default)"
+        pct_diff = 100 * (val_init / val_true - 1)
+        print(f"  {p_name}: True={val_true}, Init={val_init:.4f} ({pct_diff:+.0f}%) -> {status}")
 
-    print(f"  True g = {g_true_val}, True e = {e_true_val}")
-    print(f"  Initial g = {g_init:.4f} ({100*(g_init/g_true_val - 1):.0f}%), Initial e = {e_init} ({100*(e_init/e_true_val - 1):.0f}%)")
+
 
     # =========================================================================
     # Step 3: Create optimizer and run optimization
@@ -155,6 +176,7 @@ def run_bouncing_ball_test(config: dict):
         blend_sharpness=opt_cfg.get('blend_sharpness', 100.0),
         max_segments=opt_cfg.get('max_segments', 20),
         max_points_per_seg=opt_cfg.get('max_points_per_segment', 500),
+        prediction_method=opt_cfg.get('prediction_method', 'sigmoid'),
         verbose=True
     )
 
@@ -234,7 +256,8 @@ def run_bouncing_ball_test(config: dict):
         verbose=False,
         blend_sharpness=opt_cfg.get('blend_sharpness', 100.0),
         max_segments=opt_cfg.get('max_segments', 20),
-        max_points_per_seg=opt_cfg.get('max_points_per_segment', 500)
+        max_points_per_seg=opt_cfg.get('max_points_per_segment', 500),
+        prediction_method=opt_cfg.get('prediction_method', 'sigmoid')
     )
     y_opt = optimizer_val.predict_outputs(aug_sol_opt, t_target)
     traj_error = np.linalg.norm(y_opt - y_target) / np.linalg.norm(y_target)

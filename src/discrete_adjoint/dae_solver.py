@@ -1685,6 +1685,8 @@ class DAESolver:
                         rtol: float = 1e-6, 
                         atol: float = 1e-8,
                         ncp: int = None, # Added ncp to derive max_step
+                        max_segments: int = None, # Added to limit output segments
+                        max_points_per_seg: int = None, # Added to limit samples per segment
                         **kwargs) -> AugmentedSolution:
         """
         Solves DAE and returns the 'Natural Grid' trajectory split by events.
@@ -1694,6 +1696,11 @@ class DAESolver:
             ncp: If provided, used to set the maximum step size (max_step) 
                  ensuring segments have sufficient density for plotting/analysis.
                  max_step = (t_end - t_start) / ncp
+            max_segments: Maximum number of trajectory segments to return.
+                          Events are also filtered to include only those relevant
+                          to the returned segments.
+            max_points_per_seg: Maximum number of time points per segment.
+                                If exceeded, the segment is truncated.
         """
         t_curr, t_end = t_span
         
@@ -1858,7 +1865,7 @@ class DAESolver:
                         ))
                         
                         # Return current solution (truncated)
-                        return AugmentedSolution(segments, events)
+                        return self._finalize_augmented_solution(segments, events, max_segments, max_points_per_seg)
 
 
                     # 4. Finalize Previous Segment
@@ -1882,6 +1889,13 @@ class DAESolver:
                         np.array(cur_t), np.array(cur_x), np.array(cur_z), np.array(cur_xp)
                     ))
                     
+                    # CHECK FOR EARLY STOP: Max Segments
+                    # If we just finished a segment, check if we reached the limit
+                    if max_segments is not None and len(segments) >= max_segments:
+                         # We reached the limit. We do NOT process the event (jump) or start a new segment.
+                         # We stop here.
+                         return self._finalize_augmented_solution(segments, events, max_segments, max_points_per_seg)
+
                     # 5. Perform Reinitialization (Jump)
                     # We need x- (x_new) and x+ (reinitialized)
                     x_pre, z_pre = x_new.copy(), z_new.copy()
@@ -1986,6 +2000,47 @@ class DAESolver:
             np.array(cur_t), np.array(cur_x), np.array(cur_z), np.array(cur_xp)
         ))
         
+        return self._finalize_augmented_solution(segments, events, max_segments, max_points_per_seg)
+
+    def _finalize_augmented_solution(self, segments, events, max_segments, max_points_per_seg):
+        """Helper to post-process segments and events before returning."""
+        
+        # 1. Truncate segments if needed
+        if max_segments is not None and len(segments) > max_segments:
+            segments = segments[:max_segments]
+
+        # 2. Modify segments (Gap Logic + Max Points Truncation)
+        modified_segments = []
+        for i, seg in enumerate(segments):
+            # Start with original data
+            t, x, z, xp = seg.t, seg.x, seg.z, seg.xp
+            
+            # Apply truncation if configured
+            if max_points_per_seg is not None and len(t) > max_points_per_seg:
+                 t = t[:max_points_per_seg]
+                 x = x[:max_points_per_seg]
+                 z = z[:max_points_per_seg]
+                 xp = xp[:max_points_per_seg]
+            
+            # Apply gap logic: Remove the last sample from each segment
+            if len(t) > 1:
+                t = t[:-1]
+                x = x[:-1]
+                z = z[:-1]
+                xp = xp[:-1]
+            
+            modified_segments.append(TrajectorySegment(t, x, z, xp))
+        
+        segments = modified_segments
+
+        # 3. Filter events 
+        # Ensure no events exist after the end of the last retained segment
+        if segments:
+            last_seg_end = segments[-1].t[-1]
+            events = [ev for ev in events if ev.t_event <= last_seg_end + 1e-12]
+        else:
+            events = []
+
         return AugmentedSolution(segments, events)
 
 
