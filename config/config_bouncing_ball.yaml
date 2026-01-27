@@ -3,7 +3,7 @@ dae_solver:
   rtol: 0.00001
   start_time: 0.0
   stop_time: 2.0
-  ncp: 300
+  ncp: 400
   dae_specification_file: dae_examples/dae_specification_bouncing_ball.json
   
 optimizer:
@@ -16,15 +16,15 @@ optimizer:
       beta1: 0.9
       beta2: 0.999
       epsilon: 1.0e-8
-  blend_sharpness: 300
-  prediction_method: sigmoid  # 'sigmoid' for sigmoid blending, 'linear' for linear interpolation (matches PyTorch)
+  blend_sharpness: 250
+  prediction_method: sigmoid  # 'sigmoid', 'linear', or 'hermite'
   max_segments: 3
-  max_points_per_segment: 300
+  max_points_per_segment: 200
   opt_params:
     - g
     - e
   loss_type: mean
-  max_iterations: 500
+  max_iterations: 600
   tol: 1.0e-8
   print_every: 10
   device: cpu

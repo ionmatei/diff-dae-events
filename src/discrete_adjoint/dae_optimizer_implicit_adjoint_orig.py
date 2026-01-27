@@ -141,6 +141,15 @@ def backward_scan_kernel_implicit_masked(
     )
     return lambda_final, grad_p_final
 
+# =============================================================================
+# NOTE: Residual Separation Compliance
+# The Flow Residuals (backward_scan_kernel) operate strictly on segment-interior
+# points (including boundaries that approach the event).
+# The Event Residuals (backward_event_kernel) operate strictly on the jump
+# condition at the event time, connecting the end of one segment to the start
+# of the next. Strict separation is maintained.
+# =============================================================================
+
 
 @partial(jit, static_argnames=['f_fn', 'jump_fn', 'zc_fn', 'n_states', 'event_idx', 'optimize_indices'])
 def backward_event_kernel(lambda_post, x_pre, z_pre, x_post, z_post, tau, p_all, optimize_indices, event_idx, n_states, f_fn, jump_fn, zc_fn, dL_dtau):
@@ -455,6 +464,7 @@ class DAEOptimizerImplicitAdjoint:
         self.verbose = verbose
         self.blend_sharpness = blend_sharpness
         self.prediction_method = prediction_method.lower()
+
         self.solver = solver if solver else DAESolver(dae_data, verbose=verbose)
         self.param_names = [p['name'] for p in dae_data['parameters']]
         self.p_all = np.array([p['value'] for p in dae_data['parameters']])
@@ -550,8 +560,9 @@ class DAEOptimizerImplicitAdjoint:
             t_raw = seg.t
             
             # Create uniform grid for this segment
-            t_start, t_end = t_raw[0], t_raw[-1]
-            t_uniform = np.linspace(t_start, t_end, self.max_points_per_seg)
+            # t_start, t_end = t_raw[0], t_raw[-1]
+            # Use exact endpoints from solution
+            t_uniform = np.linspace(t_raw[0], t_raw[-1], self.max_points_per_seg)
             
             # Interpolate states
             x_interp = np.zeros((self.max_points_per_seg, self.n_states))
@@ -658,23 +669,17 @@ class DAEOptimizerImplicitAdjoint:
         grads = vjp_fn(1.0)
         grad_tau, grad_x, grad_z = grads
         
-        # We don't compute gradient w.r.t explicit time grid anymore (it's implicit in tau)
-        # Return zeros for grad_t (unused placeholder) if needed, but our caller doesn't seem to use grad_t
-        # Wait, the caller loop:
-        # dL_x_pad = dL_dx_padded[i]
-        # It doesn't use dL_t_pad.
-        # But we need to return consistent signature with sigmoid version?
-        # Sigmoid version returns: loss, grad_x, grad_z, grad_tau
-        
         return loss, grad_x, grad_z, grad_tau
 
-    def optimization_step(self, t_span, target_times, target_outputs, p_opt, ncp=200, blend_sharpness=None):
+
+
+    def optimization_step(self, t_span, target_times, target_outputs, p_opt, ncp=200, blend_sharpness=None, max_segments=None, max_points_per_seg=None):
         if blend_sharpness is None:
             blend_sharpness = self.blend_sharpness
         t0 = time.time()
 
         # 1. Forward Solve (Python/NumPy)
-        aug_sol = self.forward_solve(t_span, p_opt, ncp)
+        aug_sol = self.forward_solve(t_span, p_opt, ncp, max_segments=max_segments, max_points_per_seg=max_points_per_seg)
 
         # 2. Resampling (now included in forward time)
         pad_t, pad_x, pad_z, pad_tau, seg_mask = self._resample_trajectory(aug_sol)
@@ -692,20 +697,20 @@ class DAEOptimizerImplicitAdjoint:
         p_all_jax[np.array(self.optimize_indices)] = p_opt
         p_all_jax = jnp.array(p_all_jax)
 
-        # 3. Compute Loss & Forcing Terms (JIT Compiled with padding)
+        # 3. Compute Loss & Forcing Terms
+        # ALWAYS use the padded/differentiable path for gradients
         if self.prediction_method == 'linear':
-            # Linear interpolation (matches PyTorch implementation)
-            # Now differentiable w.r.t pad_tau
             loss, dL_dx_padded, dL_dz_padded, dL_dtau_padded = self._compute_loss_and_grad_padded_linear_jit(
                 t_span[0], pad_tau, pad_x, pad_z, seg_mask,
                 jnp.array(target_times), jnp.array(target_outputs), p_all_jax
             )
         else:
-            # Sigmoid blending (original method)
             loss, dL_dx_padded, dL_dz_padded, dL_dtau_padded = self._compute_loss_and_grad_padded_jit(
                 pad_t, pad_x, pad_z, pad_tau, seg_mask,
                 jnp.array(target_times), jnp.array(target_outputs), p_all_jax, blend_sharpness
             )
+
+
 
         # 4. Backward Sweep (Hybrid: Loop Segments, Masked Kernels)
         grad_p_total = jnp.zeros(self.n_opt_params)
@@ -779,13 +784,19 @@ class DAEOptimizerImplicitAdjoint:
         t_adjoint = time.time() - t1
         return p_opt, float(loss), np.array(grad_p_total), n_segments_actual, n_segments_jit, n_points, n_points_jit, t_forward, t_adjoint
 
-    def forward_solve(self, t_span, p_opt, ncp=200):
+    def forward_solve(self, t_span, p_opt, ncp=200, max_segments=None, max_points_per_seg=None):
         p_all = self.p_all.copy()
         p_all[np.array(self.optimize_indices)] = p_opt
         self.solver.p = p_all
         self.solver.x0 = np.array([s['start'] for s in self.dae_data['states']])
         self.solver.z0 = np.array([a.get('start', 0.0) for a in self.dae_data.get('alg_vars', [])])
-        return self.solver.solve_augmented(t_span, ncp=ncp)
+        
+        # NOTE: If max_segments/max_points_per_seg is None, we pass None to the solver,
+        # which means "unlimited" (original solution). This allows the user to overrides 
+        # the class-level defaults (self.max_segments) by passing explicit values, 
+        # or request full solution by passing None. (Note: Resampling still uses self.max_segments).
+        
+        return self.solver.solve_augmented(t_span, ncp=ncp, max_segments=max_segments, max_points_per_seg=max_points_per_seg)
 
     def optimize(
         self,
@@ -798,7 +809,9 @@ class DAEOptimizerImplicitAdjoint:
         ncp: int = 200,
         print_every: int = 10,
         algorithm: str = 'adam',
-        blend_sharpness: float = None
+        blend_sharpness: float = None,
+        max_segments: int = None,
+        max_points_per_seg: int = None
     ) -> Dict:
         """
         Run optimization loop.
@@ -843,7 +856,8 @@ class DAEOptimizerImplicitAdjoint:
             iter_start = time.time()
             # Unpack extended metrics
             _, loss, grad, n_segs_act, n_segs_jit, n_pts_act, n_pts_jit, t_fwd, t_adj = self.optimization_step(
-                t_span, target_times, target_outputs, p_opt, ncp, blend_sharpness
+                t_span, target_times, target_outputs, p_opt, ncp, blend_sharpness,
+                max_segments=max_segments, max_points_per_seg=max_points_per_seg
             )
             iter_time = time.time() - iter_start
             iter_times.append(iter_time)

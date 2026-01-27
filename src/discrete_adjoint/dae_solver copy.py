@@ -2035,11 +2035,11 @@ class DAESolver:
 
         # 3. Filter events 
         # Ensure no events exist after the end of the last retained segment
-        # if segments:
-        #     last_seg_end = segments[-1].t[-1]
-        #     events = [ev for ev in events if ev.t_event <= last_seg_end + 1e-12]
-        # else:
-        #     events = []
+        if segments:
+            last_seg_end = segments[-1].t[-1]
+            events = [ev for ev in events if ev.t_event <= last_seg_end + 1e-12]
+        else:
+            events = []
 
         return AugmentedSolution(segments, events)
 

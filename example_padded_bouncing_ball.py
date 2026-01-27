@@ -55,7 +55,8 @@ def run_bouncing_ball_test(config: dict):
     
     # Delayed import to ensure JAX finds the correct platform env var
     from src.discrete_adjoint.dae_solver import DAESolver
-    from src.discrete_adjoint.dae_optimizer_implicit_adjoint import DAEOptimizerImplicitAdjoint
+    # from src.discrete_adjoint.dae_solver import DAESolver
+    from src.discrete_adjoint.dae_optimizer_padded import DAEOptimizerPadded
 
     # Extract config sections
     solver_cfg = config['dae_solver']
@@ -169,12 +170,13 @@ def run_bouncing_ball_test(config: dict):
     print("Step 3: Run Optimization")
     print("-" * 40)
 
-    optimizer = DAEOptimizerImplicitAdjoint(
+    optimizer = DAEOptimizerPadded(
         dae_data=dae_data_init,
         optimize_params=opt_cfg['opt_params'],
         blend_sharpness=opt_cfg.get('blend_sharpness', 100.0),
         max_segments=opt_cfg.get('max_segments', 20),
-        max_points_per_seg=opt_cfg.get('max_points_per_segment', 500),
+        ncp=ncp,
+        safety_buffer_pct=opt_cfg.get('safety_buffer_pct', 1.2),
         prediction_method=opt_cfg.get('prediction_method', 'sigmoid'),
         verbose=True
     )
@@ -193,9 +195,7 @@ def run_bouncing_ball_test(config: dict):
         ncp=ncp,
         print_every=opt_cfg.get('print_every', 10),
         algorithm=algorithm_type,
-        blend_sharpness=opt_cfg.get('blend_sharpness', 100.0),
-        max_segments=opt_cfg.get('max_segments', 20),
-        max_points_per_seg=opt_cfg.get('max_points_per_segment', 500)
+        blend_sharpness=opt_cfg.get('blend_sharpness', 100.0)
     )
 
     # =========================================================================
@@ -251,13 +251,14 @@ def run_bouncing_ball_test(config: dict):
     aug_sol_opt = solver_opt.solve_augmented(t_span=t_span, ncp=ncp)
 
     # Use same prediction method as optimizer for consistent comparison
-    optimizer_val = DAEOptimizerImplicitAdjoint(
+    optimizer_val = DAEOptimizerPadded(
         dae_data=dae_data_opt,
         optimize_params=opt_cfg['opt_params'],
         verbose=False,
         blend_sharpness=opt_cfg.get('blend_sharpness', 100.0),
         max_segments=opt_cfg.get('max_segments', 20),
-        max_points_per_seg=opt_cfg.get('max_points_per_segment', 500),
+        ncp=ncp,
+        safety_buffer_pct=opt_cfg.get('safety_buffer_pct', 1.2),
         prediction_method=opt_cfg.get('prediction_method', 'sigmoid')
     )
     y_opt = optimizer_val.predict_outputs(aug_sol_opt, t_target)
