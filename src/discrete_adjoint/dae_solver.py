@@ -130,6 +130,14 @@ class DAESolver:
         # Compile JAX vectorized functions (vmap) once during initialization
         self._compile_vectorized_functions()
 
+    def update_parameters(self, p: np.ndarray):
+        """Update the parameter values used by the solver."""
+        self.p = np.array(p).copy()
+
+    def update_initial_conditions(self, x0: np.ndarray):
+        """Update the initial conditions used by the solver."""
+        self.x0 = np.array(x0).copy()
+
     def _make_safe_name(self, name: str) -> str:
         """Convert variable name to valid Python identifier."""
         # Replace dots and special chars with underscores
@@ -2023,11 +2031,11 @@ class DAESolver:
                  xp = xp[:max_points_per_seg]
             
             # Apply gap logic: Remove the last sample from each segment
-            if len(t) > 1:
-                t = t[:-1]
-                x = x[:-1]
-                z = z[:-1]
-                xp = xp[:-1]
+            # if len(t) > 1:
+            #     t = t[:-1]
+            #     x = x[:-1]
+            #     z = z[:-1]
+            #     xp = xp[:-1]
             
             modified_segments.append(TrajectorySegment(t, x, z, xp))
         

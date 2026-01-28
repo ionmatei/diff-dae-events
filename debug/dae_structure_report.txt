@@ -1,0 +1,185 @@
+DAE Solver Structure Verification Report
+========================================
+
+Testing Case: g=9.8, e=0.8
+----------------------------------------
+  Segments: 4
+  Events: 3
+
+  DETAILED PROOF FOR FIRST EVENT:
+    Segment 0 End Time:   0.451753951453
+    Event 0 Time:         0.451753951453
+    Segment 1 Start Time: 0.451753951453
+    Segment 0 End State (w-):   [-9.56595914e-14 -4.42718872e+00]
+    Event 0 Pre-State (w-):     [-9.56595914e-14 -4.42718872e+00]
+    Event 0 Post-State (w+):    [-9.56595914e-14  3.54175098e+00]
+    Segment 1 Start State (w+): [-9.56595914e-14  3.54175098e+00]
+    [CHECK] Seg0_End_T == Event_T:   True
+    [CHECK] Seg1_Start_T == Event_T: True
+    [CHECK] Seg0_End_W == Event_Pre: True
+    [CHECK] Seg1_Start_W == Event_Post: True
+
+  [PASS] Structure verified.
+
+Testing Case: g=9.8, e=0.5
+----------------------------------------
+  Segments: 9
+  Events: 8
+
+  DETAILED PROOF FOR FIRST EVENT:
+    Segment 0 End Time:   0.451753951453
+    Event 0 Time:         0.451753951453
+    Segment 1 Start Time: 0.451753951453
+    Segment 0 End State (w-):   [-9.56595914e-14 -4.42718872e+00]
+    Event 0 Pre-State (w-):     [-9.56595914e-14 -4.42718872e+00]
+    Event 0 Post-State (w+):    [-9.56595914e-14  2.21359436e+00]
+    Segment 1 Start State (w+): [-9.56595914e-14  2.21359436e+00]
+    [CHECK] Seg0_End_T == Event_T:   True
+    [CHECK] Seg1_Start_T == Event_T: True
+    [CHECK] Seg0_End_W == Event_Pre: True
+    [CHECK] Seg1_Start_W == Event_Post: True
+
+  [PASS] Structure verified.
+
+Testing Case: g=9.8, e=0.9
+----------------------------------------
+  Segments: 4
+  Events: 3
+
+  DETAILED PROOF FOR FIRST EVENT:
+    Segment 0 End Time:   0.451753951453
+    Event 0 Time:         0.451753951453
+    Segment 1 Start Time: 0.451753951453
+    Segment 0 End State (w-):   [-9.56595914e-14 -4.42718872e+00]
+    Event 0 Pre-State (w-):     [-9.56595914e-14 -4.42718872e+00]
+    Event 0 Post-State (w+):    [-9.56595914e-14  3.98446985e+00]
+    Segment 1 Start State (w+): [-9.56595914e-14  3.98446985e+00]
+    [CHECK] Seg0_End_T == Event_T:   True
+    [CHECK] Seg1_Start_T == Event_T: True
+    [CHECK] Seg0_End_W == Event_Pre: True
+    [CHECK] Seg1_Start_W == Event_Post: True
+
+  [PASS] Structure verified.
+
+Testing Case: g=5.0, e=0.8
+----------------------------------------
+  Segments: 3
+  Events: 2
+
+  DETAILED PROOF FOR FIRST EVENT:
+    Segment 0 End Time:   0.632455532034
+    Event 0 Time:         0.632455532034
+    Segment 1 Start Time: 0.632455532034
+    Segment 0 End State (w-):   [-5.18751708e-14 -3.16227766e+00]
+    Event 0 Pre-State (w-):     [-5.18751708e-14 -3.16227766e+00]
+    Event 0 Post-State (w+):    [-5.18751708e-14  2.52982213e+00]
+    Segment 1 Start State (w+): [-5.18751708e-14  2.52982213e+00]
+    [CHECK] Seg0_End_T == Event_T:   True
+    [CHECK] Seg1_Start_T == Event_T: True
+    [CHECK] Seg0_End_W == Event_Pre: True
+    [CHECK] Seg1_Start_W == Event_Post: True
+
+  [PASS] Structure verified.
+
+Testing Case: g=5.0, e=0.5
+----------------------------------------
+  Segments: 9
+  Events: 8
+
+  DETAILED PROOF FOR FIRST EVENT:
+    Segment 0 End Time:   0.632455532034
+    Event 0 Time:         0.632455532034
+    Segment 1 Start Time: 0.632455532034
+    Segment 0 End State (w-):   [-5.18751708e-14 -3.16227766e+00]
+    Event 0 Pre-State (w-):     [-5.18751708e-14 -3.16227766e+00]
+    Event 0 Post-State (w+):    [-5.18751708e-14  1.58113883e+00]
+    Segment 1 Start State (w+): [-5.18751708e-14  1.58113883e+00]
+    [CHECK] Seg0_End_T == Event_T:   True
+    [CHECK] Seg1_Start_T == Event_T: True
+    [CHECK] Seg0_End_W == Event_Pre: True
+    [CHECK] Seg1_Start_W == Event_Post: True
+
+  [PASS] Structure verified.
+
+Testing Case: g=5.0, e=0.9
+----------------------------------------
+  Segments: 3
+  Events: 2
+
+  DETAILED PROOF FOR FIRST EVENT:
+    Segment 0 End Time:   0.632455532034
+    Event 0 Time:         0.632455532034
+    Segment 1 Start Time: 0.632455532034
+    Segment 0 End State (w-):   [-5.18751708e-14 -3.16227766e+00]
+    Event 0 Pre-State (w-):     [-5.18751708e-14 -3.16227766e+00]
+    Event 0 Post-State (w+):    [-5.18751708e-14  2.84604989e+00]
+    Segment 1 Start State (w+): [-5.18751708e-14  2.84604989e+00]
+    [CHECK] Seg0_End_T == Event_T:   True
+    [CHECK] Seg1_Start_T == Event_T: True
+    [CHECK] Seg0_End_W == Event_Pre: True
+    [CHECK] Seg1_Start_W == Event_Post: True
+
+  [PASS] Structure verified.
+
+Testing Case: g=15.0, e=0.8
+----------------------------------------
+  Segments: 5
+  Events: 4
+
+  DETAILED PROOF FOR FIRST EVENT:
+    Segment 0 End Time:   0.365148371670
+    Event 0 Time:         0.365148371670
+    Segment 1 Start Time: 0.365148371670
+    Segment 0 End State (w-):   [-6.08402217e-14 -5.47722558e+00]
+    Event 0 Pre-State (w-):     [-6.08402217e-14 -5.47722558e+00]
+    Event 0 Post-State (w+):    [-6.08402217e-14  4.38178046e+00]
+    Segment 1 Start State (w+): [-6.08402217e-14  4.38178046e+00]
+    [CHECK] Seg0_End_T == Event_T:   True
+    [CHECK] Seg1_Start_T == Event_T: True
+    [CHECK] Seg0_End_W == Event_Pre: True
+    [CHECK] Seg1_Start_W == Event_Post: True
+
+  [PASS] Structure verified.
+
+Testing Case: g=15.0, e=0.5
+----------------------------------------
+  Segments: 9
+  Events: 8
+
+  DETAILED PROOF FOR FIRST EVENT:
+    Segment 0 End Time:   0.365148371670
+    Event 0 Time:         0.365148371670
+    Segment 1 Start Time: 0.365148371670
+    Segment 0 End State (w-):   [-6.08402217e-14 -5.47722558e+00]
+    Event 0 Pre-State (w-):     [-6.08402217e-14 -5.47722558e+00]
+    Event 0 Post-State (w+):    [-6.08402217e-14  2.73861279e+00]
+    Segment 1 Start State (w+): [-6.08402217e-14  2.73861279e+00]
+    [CHECK] Seg0_End_T == Event_T:   True
+    [CHECK] Seg1_Start_T == Event_T: True
+    [CHECK] Seg0_End_W == Event_Pre: True
+    [CHECK] Seg1_Start_W == Event_Post: True
+
+  [PASS] Structure verified.
+
+Testing Case: g=15.0, e=0.9
+----------------------------------------
+  Segments: 4
+  Events: 3
+
+  DETAILED PROOF FOR FIRST EVENT:
+    Segment 0 End Time:   0.365148371670
+    Event 0 Time:         0.365148371670
+    Segment 1 Start Time: 0.365148371670
+    Segment 0 End State (w-):   [-6.08402217e-14 -5.47722558e+00]
+    Event 0 Pre-State (w-):     [-6.08402217e-14 -5.47722558e+00]
+    Event 0 Post-State (w+):    [-6.08402217e-14  4.92950302e+00]
+    Segment 1 Start State (w+): [-6.08402217e-14  4.92950302e+00]
+    [CHECK] Seg0_End_T == Event_T:   True
+    [CHECK] Seg1_Start_T == Event_T: True
+    [CHECK] Seg0_End_W == Event_Pre: True
+    [CHECK] Seg1_Start_W == Event_Post: True
+
+  [PASS] Structure verified.
+
+========================================
+OVERALL RESULT: PASS
