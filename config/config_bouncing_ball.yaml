@@ -2,7 +2,7 @@ dae_solver:
   atol: 0.00001
   rtol: 0.00001
   start_time: 0.0
-  stop_time: 1.5
+  stop_time: 2.0
   ncp: 200
   dae_specification_file: dae_examples/dae_specification_bouncing_ball.json
   
@@ -16,17 +16,19 @@ optimizer:
       beta1: 0.9
       beta2: 0.999
       epsilon: 1.0e-8
-  blend_sharpness: 150
+  blend_sharpness: 300
   prediction_method: sigmoid  # 'sigmoid', 'linear', or 'hermite'
   max_segments: 3
-  max_points_per_segment: 200
+  max_points_per_segment: 300
   opt_params:
     - g
     - e
   learning_rate: 0.01
-  max_iterations: 150
+  max_iterations: 500
   tol: 1.0e-8
   print_every: 10
+  max_blocks: 15
+  max_targets: 250
   device: cpu
   gpu_memory_fraction: 0.9
 

@@ -218,7 +218,7 @@ def pack_solution(sol, dae_data):
             
     return jnp.array(w_list), structure, grid_taus
 
-def unpack_and_compute_residual(W_flat, p_opt, dae_data, structure, funcs, param_mapping, grid_taus):
+def unpack_and_compute_residual(W_flat, p_opt, dae_data, structure, funcs, param_mapping, grid_taus, t_final=2.0):
     """
     Computes global residual vector.
     Uses SCAN for segments (Fast) and standard logic for events.
@@ -247,7 +247,7 @@ def unpack_and_compute_residual(W_flat, p_opt, dae_data, structure, funcs, param
         temp_idx += length
         
     t_curr = 0.0
-    t_final_fixed = 2.0
+    t_final_fixed = t_final
     ev_ptr = 0
     
     last_x, last_z = None, None
@@ -320,7 +320,7 @@ def unpack_and_compute_residual(W_flat, p_opt, dae_data, structure, funcs, param
 
 # --- 3. Helpers (Loss & Prediction) ---
 
-def unpack_solution_structure(W_flat, structure, n_dims, grid_taus):
+def unpack_solution_structure(W_flat, structure, n_dims, grid_taus, t_final=2.0):
     n_x, n_z, n_w = n_dims
     segments_t = []
     segments_x = []
@@ -338,7 +338,7 @@ def unpack_solution_structure(W_flat, structure, n_dims, grid_taus):
 
     idx_scan = 0
     t_curr = 0.0
-    t_final = 2.0
+    # t_final provided as arg
     ev_ptr = 0
     seg_ctr = 0
 

@@ -1862,15 +1862,28 @@ class DAESolver:
                         #  Let's check logic above: cur_t initialized at loop start.
                         #  If flag=2, we haven't appended tau yet.)
                         
-                        cur_t.append(tau)
-                        cur_x.append(x_new)
-                        cur_z.append(z_new)
-                        cur_xp.append(xp_new)
+                        # Add the event point to close the segment ONLY if time advanced
+                        if len(cur_t) == 0 or tau > cur_t[-1] + 1e-9:
+                            cur_t.append(tau)
+                            cur_x.append(x_new)
+                            cur_z.append(z_new)
+                            cur_xp.append(xp_new)
+                        else:
+                            # If zero step, we can update the last point, but better to just keep the consistent one
+                            # Updating might introduce a jump. Let's strictly only append if advanced.
+                            # However, to capture the event time exactly:
+                            cur_t[-1] = tau
+                            # Do NOT update states if it implies a jump. 
+                            # But x_new is the state at tau. 
+                            # If x_new differs from x_old, we have a problem.
+                            # For safety in Zeno, let's just terminate with what we have.
+                            pass
                         
-                        # Add partial segment
-                        segments.append(TrajectorySegment(
-                            np.array(cur_t), np.array(cur_x), np.array(cur_z), np.array(cur_xp)
-                        ))
+                        # Add partial segment (ensure at least 1 point)
+                        if len(cur_t) > 0:
+                            segments.append(TrajectorySegment(
+                                np.array(cur_t), np.array(cur_x), np.array(cur_z), np.array(cur_xp)
+                            ))
                         
                         # Return current solution (truncated)
                         return self._finalize_augmented_solution(segments, events, max_segments, max_points_per_seg)
@@ -2017,25 +2030,30 @@ class DAESolver:
         if max_segments is not None and len(segments) > max_segments:
             segments = segments[:max_segments]
 
-        # 2. Modify segments (Gap Logic + Max Points Truncation)
+        # 2. Modify segments (Gap Logic + Max Points Truncation + Duplicate Filter)
         modified_segments = []
+        tol_dup = 1e-9
+        
         for i, seg in enumerate(segments):
             # Start with original data
             t, x, z, xp = seg.t, seg.x, seg.z, seg.xp
             
-            # Apply truncation if configured
+            # 1. Filter duplicates (dt < tol)
+            if len(t) > 1:
+                # Keep first point, and any point where t[k] > t[k-1] + tol
+                valid_mask = np.concatenate(([True], np.diff(t) > tol_dup))
+                t = t[valid_mask]
+                x = x[valid_mask]
+                z = z[valid_mask]
+                xp = xp[valid_mask]
+            
+            # 2. Apply truncation if configured
             if max_points_per_seg is not None and len(t) > max_points_per_seg:
                  t = t[:max_points_per_seg]
                  x = x[:max_points_per_seg]
                  z = z[:max_points_per_seg]
                  xp = xp[:max_points_per_seg]
             
-            # Apply gap logic: Remove the last sample from each segment
-            # if len(t) > 1:
-            #     t = t[:-1]
-            #     x = x[:-1]
-            #     z = z[:-1]
-            #     xp = xp[:-1]
             
             modified_segments.append(TrajectorySegment(t, x, z, xp))
         
@@ -2043,11 +2061,16 @@ class DAESolver:
 
         # 3. Filter events 
         # Ensure no events exist after the end of the last retained segment
-        # if segments:
-        #     last_seg_end = segments[-1].t[-1]
-        #     events = [ev for ev in events if ev.t_event <= last_seg_end + 1e-12]
-        # else:
-        #     events = []
+        # In particular, we cannot have an event without a following segment (dangling event),
+        # as this leads to undefined adjoint residuals (no x_post variables to enforce jump).
+        if segments:
+            # We expect N segments and N-1 events.
+            # If we have N events, the last one is dangling.
+            expected_events = len(segments) - 1
+            if len(events) > expected_events:
+                 events = events[:expected_events]
+        else:
+            events = []
 
         return AugmentedSolution(segments, events)
 

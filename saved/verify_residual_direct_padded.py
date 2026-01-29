@@ -18,8 +18,7 @@ def compute_adjoint_sweep_padded(
     dL_dp,           # (n_p,) float
     funcs, 
     dims,
-    max_blocks,
-    dL_db_param=None # (MAX_BLOCKS,) float
+    max_blocks
 ):
     f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, reinit_vars, dims = funcs
     n_x, n_z, n_p = dims
@@ -163,12 +162,8 @@ def compute_adjoint_sweep_padded(
              w_post_start = w_post_seg[0]
              
              t_event = block_param[block_idx] 
-             # Use dL_db_param if available (it contains dL/dt_event), 
-             # otherwise fallback to dL_block[0,0] (old convention).
-             if dL_db_param is not None:
-                 dL_t = dL_db_param[block_idx]
-             else:
-                 dL_t = dL_block[0, 0] 
+             # Extract mapped dL_t (stored in first element of block)
+             dL_t = dL_block[0, 0] 
              
              tuple_res = solve_event_system_affine_jit(
                  t_event, w_prev_end, w_post_start, curr_adj, dL_t, curr_mesh, funcs, dims, p_opt

@@ -273,7 +273,7 @@ def pack_solution(sol, dae_data):
             
     return jnp.array(w_list), structure, grid_taus
 
-def unpack_and_compute_residual(W_flat, p_opt, dae_data, structure, funcs, param_mapping, grid_taus):
+def unpack_and_compute_residual(W_flat, p_opt, dae_data, structure, funcs, param_mapping, grid_taus, t_final=2.0):
     """
     Reconstructs trajectory from W and computes global Residual vector.
     Uses grid_taus (normalized) to reconstruct time grid.
@@ -295,7 +295,7 @@ def unpack_and_compute_residual(W_flat, p_opt, dae_data, structure, funcs, param
     event_indices_in_W = []
     idx_scan = 0
     t_start_seg = 0.0
-    t_final = 2.0 # Fixed final time assumption
+    # t_final used from arg
     
     for i, (kind, count, *_) in enumerate(structure):
         if kind == 'event_time':
@@ -558,11 +558,11 @@ def prepare_loss_targets(sol, state_names, t_start, t_end):
         
         # Left Boundary
         start_idx = 0
-        if i > 0: # Exclude start (te)
-            t_start_val = t_arr[0]
-            # Skip all points roughly equal to t_start_val
-            while start_idx < n and abs(t_arr[start_idx] - t_start_val) < tol_dup:
-                start_idx += 1
+        # if i > 0: # Exclude start (te) - COMMENTED OUT for Right Continuity
+        #     t_start_val = t_arr[0]
+        #     # Skip all points roughly equal to t_start_val
+        #     while start_idx < n and abs(t_arr[start_idx] - t_start_val) < tol_dup:
+        #         start_idx += 1
                 
         # Right Boundary
         end_idx = n

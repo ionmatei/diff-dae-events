@@ -18,8 +18,7 @@ def compute_adjoint_sweep_padded(
     dL_dp,           # (n_p,) float
     funcs, 
     dims,
-    max_blocks,
-    dL_db_param=None # (MAX_BLOCKS,) float
+    max_blocks
 ):
     f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, reinit_vars, dims = funcs
     n_x, n_z, n_p = dims
@@ -78,6 +77,7 @@ def compute_adjoint_sweep_padded(
             
             # Check if we have a Pending Event (Joint Solve)
             pending_active = curr_pend[0]
+            # jax.debug.print("Blk {} Pending {}", block_idx, pending_active)
             
             def branch_joint_solve(args):
                 p_adj, p_mesh, p_gp, p_pend = args
@@ -112,6 +112,9 @@ def compute_adjoint_sweep_padded(
                 
                 total_gp_seg = grad_p_stack[0] + c_val * grad_p_stack[1]
                 inc_gp = gp_mu0 + c_val * gp_v + total_gp_seg
+                
+                jax.debug.print("Joint Blk {}: gp_stack[0]={} c_val={} inc_gp={}", block_idx, grad_p_stack[0], c_val, inc_gp)
+
                 new_mesh = grad_ts_stack[0] + c_val * grad_ts_stack[1]
                 
                 new_pend = init_pending
@@ -126,6 +129,7 @@ def compute_adjoint_sweep_padded(
                     W_block, T_block, dL_block, p_adj, n_pts_valid, funcs, dims, p_opt
                 )
                 
+                jax.debug.print("Std Solve Blk {} GP_seg {}", block_idx, grad_p_seg)
                 
                 return sens_w0, grad_ts, p_gp + grad_p_seg, p_pend
                 
@@ -163,12 +167,8 @@ def compute_adjoint_sweep_padded(
              w_post_start = w_post_seg[0]
              
              t_event = block_param[block_idx] 
-             # Use dL_db_param if available (it contains dL/dt_event), 
-             # otherwise fallback to dL_block[0,0] (old convention).
-             if dL_db_param is not None:
-                 dL_t = dL_db_param[block_idx]
-             else:
-                 dL_t = dL_block[0, 0] 
+             # Extract mapped dL_t (stored in first element of block)
+             dL_t = dL_block[0, 0] 
              
              tuple_res = solve_event_system_affine_jit(
                  t_event, w_prev_end, w_post_start, curr_adj, dL_t, curr_mesh, funcs, dims, p_opt
@@ -193,6 +193,7 @@ def compute_adjoint_sweep_padded(
             [case_pad, case_segment, case_event],
             carry
         )
+        jax.debug.print("Blk {}: Type {} GP_in {} GP_out {}", block_idx, b_type, carry[2], new_carry[2])
         return new_carry, None
 
     final_carry, _ = jax.lax.scan(scan_body, init_carry, scan_indices)
@@ -345,6 +346,7 @@ def run_segment_backward_sweep(w_nodes, ts, dL_nodes, load_at_end, n_pts_valid, 
     
     sens_w0 = final_carry[0]
     total_gp = jnp.sum(grads_p, axis=0)
+    jax.debug.print("Seg Total GP: {}", total_gp)
     total_gTs = final_carry[2]
     total_gTe = final_carry[3]
     
@@ -394,6 +396,20 @@ def solve_event_system_affine_jit(t_event, w_prev_end, w_post_start, adjoint_sta
     Q, _ = jax.scipy.linalg.qr(J_xp, mode='full')
     v_null = Q[:, -1]
     
+    # PAD Output to n_mu_max (n_x + n_z + 1)
+    # Why +1? Just in case? Or matching some logic?
+    # init_pending used n_x + n_z + 1.
+    n_mu_max = n_x + n_z + 1
+    
+    def safe_pad(arr):
+        pad_len = n_mu_max - arr.shape[0]
+        if pad_len > 0:
+            return jnp.pad(arr, (0, pad_len))
+        return arr[:n_mu_max] # clip if larger?
+        
+    mu_0_padded = safe_pad(mu_0)
+    v_null_padded = safe_pad(v_null)
+    
     # 3. Precompute terms
     # mesh_sens_prev here is actually mesh_sens of NEXT segment (forward time)
     # Passed as 'mesh_sens_next_seg' in v3.
@@ -415,7 +431,7 @@ def solve_event_system_affine_jit(t_event, w_prev_end, w_post_start, adjoint_sta
         load_prev_mu0, load_prev_v, 
         t_e_rhs_base, t_e_slope, 
         gp_mu0, gp_v, 
-        mu_0, v_null
+        mu_0_padded, v_null_padded
     )
 
 
@@ -637,7 +653,67 @@ def solve_local_step_adjoint_jit(w_c, w_n, t_c, t_n, load_at_n, funcs, dims, p_o
         
     _, vjp_p = jax.vjp(step_res_p, p_opt)
     grad_p_step = vjp_p(lam_combined)[0]
-    
+    jax.debug.print("Grad P Step: {}", grad_p_step) # Debug only
+
     #                 ln=jnp.linalg.norm(load_at_n), lmn=jnp.linalg.norm(lam_combined), gp=grad_p_step)
     
+
     return grad_p_step, lam_combined, partial_load_k
+    
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+@partial(jax.jit, static_argnames=['dims']) 
+def pad_problem_data_jit(
+    ts_all_ragged, ys_all_ragged, event_ts_ragged, 
+    max_blocks, max_pts, dims
+):
+     """
+     JIT-compatible padding is hard because inputs are ragged.
+     This helper is meant to be called from Python (non-JIT) to prepare arrays.
+     """
+     pass
+
+def pad_problem_data(ts_all, ys_all, event_infos, max_blocks, max_pts, dims):
+    """
+    Converts dynamic trajectory data into padded fixed-size arrays.
+    """
+    n_x, n_z, n_p = dims
+    n_w = n_x + n_z
+    
+    W_padded = np.zeros((max_blocks, max_pts, n_w))
+    TS_padded = np.zeros((max_blocks, max_pts))
+    block_types = np.zeros(max_blocks, dtype=int)
+    block_indices = np.zeros((max_blocks, 2), dtype=int)
+    block_param = np.zeros(max_blocks)
+    dL_padded = np.zeros((max_blocks, max_pts, n_w))
+    
+    curr_blk = 0
+    n_segs = len(ts_all)
+    n_evs = len(event_infos)
+    
+    for i in range(n_segs):
+        # 1. Segment
+        if curr_blk >= max_blocks: raise ValueError("Exceeded max_blocks")
+        n_pts = ts_all[i].shape[0]
+        if n_pts > max_pts: raise ValueError(f"Segment {i} points {n_pts} > max_pts {max_pts}")
+            
+        W_padded[curr_blk, :n_pts, :] = ys_all[i]
+        TS_padded[curr_blk, :n_pts] = ts_all[i]
+        block_types[curr_blk] = 1 # Segment
+        block_indices[curr_blk] = [0, n_pts] 
+        curr_blk += 1
+        
+
+        # 2. Event
+        if i < n_evs:
+            if curr_blk >= max_blocks: raise ValueError("Exceeded max_blocks")
+            t_ev, ev_idx = event_infos[i]
+            block_types[curr_blk] = 2 # Event
+            block_indices[curr_blk] = [0, 1]
+            block_param[curr_blk] = t_ev
+            curr_blk += 1
+            
+    return W_padded, TS_padded, block_types, block_indices, block_param, dL_padded
+

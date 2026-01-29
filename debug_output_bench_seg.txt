@@ -1,0 +1,48 @@
+JAX Default Device: cuda:0
+
+=== PHASE 1: Default Parameters (Optimum) ===
+Target Params p0: [9.81 0.8 ]
+Generating Solution 1 (Default)...
+dL/dW norm: 29.858571493087684
+Running Padded Solver (Compiling)...
+Compute Time (Compile): 1.3704s
+Gradient at p0: [-2.93746779 60.24586019]
+WARNING: Gradient at optimum is not close to zero!
+
+=== PHASE 2: Perturbed Parameters ===
+Perturbed Params p1: [10.791  0.88 ]
+Generating Solution 2 (Perturbed)...
+Dense Gradient: [-2.58103836 55.76433265]
+Running Padded Solver (Reuse JIT)...
+Compute Time (Reuse): 0.9216s
+Padded Gradient: [-2.58103836 55.76433265]
+
+Gradient Difference: 8.881784e-16
+SUCCESS: Gradient matches Dense reference.
+
+Performance Check:
+Compile Time: 1.3704s
+Reuse Time:   0.9216s
+WARNING: Execution time suggests potential recompilation! Checking steady state...
+
+=== PHASE 3: Stability Check (Reuse Again with Same Params) ===
+Compute Time (Steady): 0.7695s
+Compute Time (Steady): 0.7528s
+Compute Time (Steady): 0.7371s
+Compute Time (Steady): 0.7832s
+Compute Time (Steady): 0.7632s
+Compute Time (Steady): 0.7425s
+Compute Time (Steady): 0.7142s
+Compute Time (Steady): 0.7024s
+Compute Time (Steady): 0.7838s
+Compute Time (Steady): 0.7628s
+WARNING: Run 3 is significantly different from Run 2. Phase 2 might have recompiled.
+
+=== PHASE 4: Event Solver Micro-Benchmark ===
+Benchmarking solve_event_system_affine_jit...
+Avg Event Solve Time: 5.2334 ms
+
+=== PHASE 5: Segment Scan Micro-Benchmark ===
+Benchmarking run_segment_backward_sweep (JIT)...
+Avg Segment Scan Time (100 pts): 144.0388 ms
+Est. Total Segment Time (20 blocks): 2.8808s
