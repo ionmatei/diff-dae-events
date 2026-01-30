@@ -10,19 +10,13 @@ import time
 import re
 
 class DAEMatrixGradient:
-    def __init__(self, dae_data, max_pts=500, downsample_segments=False, all_segments=False):
+    def __init__(self, dae_data):
         """
         Initialize the Matrix Gradient Computer.
         Args:
             dae_data: Dictionary containing DAE system specification
-            max_pts: Maximum points per segment (used when downsample_segments=True)
-            downsample_segments: If True, downsample segments exceeding max_pts
-            all_segments: If True (and downsample_segments=True), resample ALL segments to max_pts
         """
         self.dae_data = dae_data
-        self.max_pts = max_pts
-        self.downsample_segments = downsample_segments
-        self.all_segments = all_segments
 
         # Create JAX functions
         self.funcs = self._create_jax_functions(dae_data)
@@ -130,19 +124,6 @@ class DAEMatrixGradient:
 
         return f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, tuple(reinit_vars), (len(state_names), len(alg_names), len(param_names))
 
-    @staticmethod
-    def _downsample_segment(t_seg, y_seg, max_pts):
-        """Downsample a segment to max_pts points via linear interpolation.
-
-        Preserves first and last time instants. Interior points are
-        uniformly spaced. State values are linearly interpolated.
-        """
-        t_new = np.linspace(t_seg[0], t_seg[-1], max_pts)
-        y_new = np.empty((max_pts, y_seg.shape[1]), dtype=y_seg.dtype)
-        for col in range(y_seg.shape[1]):
-            y_new[:, col] = np.interp(t_new, t_seg, y_seg[:, col])
-        return t_new, y_new
-
     def pack_solution(self, sol):
         """
         Packs AugmentedSolution into flat W and structure description.
@@ -150,39 +131,28 @@ class DAEMatrixGradient:
         """
         w_list = []
         structure = []
-        grid_taus = []
-
+        grid_taus = [] 
+        
         num_seg = len(sol.segments)
         num_events = len(sol.events)
-
-        # Pre-extract and optionally downsample segment data (numpy)
-        seg_ts = [np.asarray(s.t) for s in sol.segments]
-        seg_ys = [np.concatenate([s.x, s.z], axis=1) for s in sol.segments]
-        if self.downsample_segments:
-            for i in range(num_seg):
-                should_downsample = self.all_segments or (seg_ts[i].shape[0] > self.max_pts)
-                if should_downsample:
-                    seg_ts[i], seg_ys[i] = self._downsample_segment(
-                        seg_ts[i], seg_ys[i], self.max_pts
-                    )
-
+        
         for i in range(num_seg):
-            t_arr = seg_ts[i]
-            y_arr = seg_ys[i]
-            n_points = t_arr.shape[0]
+            seg = sol.segments[i]
+            n_points = len(seg.t)
             
             # Calculate Tau Grid (Normalized)
-            t_start = t_arr[0]
-            t_end = t_arr[-1]
+            t_start = seg.t[0]
+            t_end = seg.t[-1]
             denom = t_end - t_start
             if denom < 1e-12: denom = 1.0
-            tau = (t_arr - t_start) / denom
+            tau = (seg.t - t_start) / denom
             grid_taus.append(tau)
-
+            
             seg_start_idx = len(w_list)
-
+            
             for k in range(n_points):
-                w_list.extend(y_arr[k])
+                w_list.extend(seg.x[k])
+                w_list.extend(seg.z[k] if len(seg.z) > 0 else [])
                 
             seg_len = len(w_list) - seg_start_idx
             structure.append(('segment', n_points, seg_len))
@@ -415,16 +385,19 @@ class DAEMatrixGradient:
 
                     mask = jax.nn.sigmoid(blend_sharpness * (t_q - lower)) * jax.nn.sigmoid(blend_sharpness * (upper - t_q))
 
-                    # O(1) piecewise-linear interpolation via soft fractional index
+                    # Soft interpolation: Gaussian kernel weights
                     t_clip = jnp.clip(t_q, t_start, t_end)
                     n_pts = ts.shape[0]
-                    span = jnp.maximum(t_end - t_start, 1e-12)
-                    frac = jnp.clip((t_clip - t_start) / span, 0.0, 1.0)
-                    frac_idx = frac * (n_pts - 1)
-                    idx_lo = jnp.floor(frac_idx).astype(jnp.int32)
-                    idx_lo = jnp.clip(idx_lo, 0, n_pts - 2)
-                    a = frac_idx - idx_lo.astype(jnp.float64)
-                    val = xs[idx_lo] * (1.0 - a) + xs[idx_lo + 1] * a
+                    dt_typ = jnp.maximum((t_end - t_start) / jnp.maximum(n_pts - 1, 1), 1e-12)
+                    sigma = 2.0 * dt_typ
+                    alpha = 0.5 / (sigma * sigma)
+
+                    d = ts - t_clip
+                    gw = jnp.exp(-alpha * d * d)
+                    gw_sum = jnp.sum(gw)
+                    gw = gw / (gw_sum + 1e-12)
+
+                    val = jnp.sum(xs * gw[:, None], axis=0)
 
                     y_accum += mask * val
                     w_accum += mask
@@ -443,7 +416,7 @@ class DAEMatrixGradient:
             J_p = jax.jacfwd(residual_fn, argnums=1)(W_flat, p_val, grid_taus, t_final_val)
 
             # 2. Loss Gradients
-            loss_val, dL_dW = jax.value_and_grad(loss_fn, argnums=0)(W_flat, p_val, grid_taus, target_times, target_data, t_final_val, blend_sharpness)
+            dL_dW = jax.grad(loss_fn, argnums=0)(W_flat, p_val, grid_taus, target_times, target_data, t_final_val, blend_sharpness)
             dL_dp = jax.grad(loss_fn, argnums=1)(W_flat, p_val, grid_taus, target_times, target_data, t_final_val, blend_sharpness)
 
             # 3. Adjoint Solve
@@ -451,87 +424,10 @@ class DAEMatrixGradient:
 
             # 4. Total Gradient
             total_grad = dL_dp + jnp.dot(lam, J_p)
-            return loss_val, total_grad
+            return total_grad
 
         # Compile
         jit_kernel = jax.jit(compute_grads)
-        self._kernel_cache[struct_key] = jit_kernel
-        return jit_kernel
-
-    def _get_prediction_kernel(self, structure):
-        """Returns a JIT kernel that computes predicted trajectory."""
-        struct_key = ('predict',) + tuple(structure)
-        if struct_key in self._kernel_cache:
-            return self._kernel_cache[struct_key]
-        
-        n_x, n_z, n_p = self.dims
-        n_w = n_x + n_z
-
-        def predict_fn(W_flat, grid_taus, target_times, t_final_val, blend_sharpness):
-            # Same unpacking logic as loss_fn
-            idx_scan = 0
-            event_vals = []
-            for kind, count, *extra in structure:
-                length = extra[0] if kind == 'segment' else count
-                if kind == 'event_time':
-                    event_vals.append(W_flat[idx_scan])
-                idx_scan += length
-            
-            event_counter = 0
-            seg_counter = 0
-            idx_scan = 0
-            t_start_seg = 0.0
-            segments_t = []
-            segments_x = []
-            
-            for kind, count, *extra in structure:
-                if kind == 'segment':
-                    length = extra[0]
-                    chunk = W_flat[idx_scan : idx_scan + length].reshape((count, n_w))
-                    idx_scan += length
-                    xs = chunk[:, :n_x]
-                    if event_counter < len(event_vals):
-                        te = event_vals[event_counter]
-                    else:
-                        te = t_final_val
-                    current_tau = grid_taus[seg_counter]
-                    t0 = t_start_seg
-                    ts = t0 + current_tau * (te - t0)
-                    segments_t.append(ts)
-                    segments_x.append(xs)
-                    t_start_seg = te
-                    seg_counter += 1
-                elif kind == 'event_time':
-                    idx_scan += 1
-                    event_counter += 1
-            
-            def predict_at_t(t_q):
-                y_accum = jnp.zeros(n_x)
-                w_accum = 0.0
-                for i in range(len(segments_t)):
-                    ts = segments_t[i]
-                    xs = segments_x[i]
-                    t_start = ts[0]
-                    t_end = ts[-1]
-                    lower = t_start if i == 0 else event_vals[i-1]
-                    upper = t_end if i == len(segments_t)-1 else event_vals[i]
-                    mask = jax.nn.sigmoid(blend_sharpness * (t_q - lower)) * jax.nn.sigmoid(blend_sharpness * (upper - t_q))
-                    t_clip = jnp.clip(t_q, t_start, t_end)
-                    n_pts = ts.shape[0]
-                    span = jnp.maximum(t_end - t_start, 1e-12)
-                    frac = jnp.clip((t_clip - t_start) / span, 0.0, 1.0)
-                    frac_idx = frac * (n_pts - 1)
-                    idx_lo = jnp.floor(frac_idx).astype(jnp.int32)
-                    idx_lo = jnp.clip(idx_lo, 0, n_pts - 2)
-                    a = frac_idx - idx_lo.astype(jnp.float64)
-                    val = xs[idx_lo] * (1.0 - a) + xs[idx_lo + 1] * a
-                    y_accum += mask * val
-                    w_accum += mask
-                return y_accum / (w_accum + 1e-8)
-            
-            return jax.vmap(predict_at_t)(target_times)
-
-        jit_kernel = jax.jit(predict_fn)
         self._kernel_cache[struct_key] = jit_kernel
         return jit_kernel
 
@@ -595,13 +491,14 @@ class DAEMatrixGradient:
                     mask = jax.nn.sigmoid(blend_sharpness * (t_q - lower)) * jax.nn.sigmoid(blend_sharpness * (upper - t_q))
                     t_clip = jnp.clip(t_q, t_start, t_end)
                     n_pts = ts.shape[0]
-                    span = jnp.maximum(t_end - t_start, 1e-12)
-                    frac = jnp.clip((t_clip - t_start) / span, 0.0, 1.0)
-                    frac_idx = frac * (n_pts - 1)
-                    idx_lo = jnp.floor(frac_idx).astype(jnp.int32)
-                    idx_lo = jnp.clip(idx_lo, 0, n_pts - 2)
-                    a = frac_idx - idx_lo.astype(jnp.float64)
-                    val = xs[idx_lo] * (1.0 - a) + xs[idx_lo + 1] * a
+                    dt_typ = jnp.maximum((t_end - t_start) / jnp.maximum(n_pts - 1, 1), 1e-12)
+                    sigma = 2.0 * dt_typ
+                    alpha = 0.5 / (sigma * sigma)
+                    d = ts - t_clip
+                    gw = jnp.exp(-alpha * d * d)
+                    gw_sum = jnp.sum(gw)
+                    gw = gw / (gw_sum + 1e-12)
+                    val = jnp.sum(xs * gw[:, None], axis=0)
                     y_accum += mask * val
                     w_accum += mask
                 return y_accum / (w_accum + 1e-8)
@@ -773,13 +670,14 @@ class DAEMatrixGradient:
                     mask = jax.nn.sigmoid(blend_sharpness * (t_q - lower)) * jax.nn.sigmoid(blend_sharpness * (upper - t_q))
                     t_clip = jnp.clip(t_q, t_start, t_end)
                     n_pts = ts.shape[0]
-                    span = jnp.maximum(t_end - t_start, 1e-12)
-                    frac = jnp.clip((t_clip - t_start) / span, 0.0, 1.0)
-                    frac_idx = frac * (n_pts - 1)
-                    idx_lo = jnp.floor(frac_idx).astype(jnp.int32)
-                    idx_lo = jnp.clip(idx_lo, 0, n_pts - 2)
-                    a = frac_idx - idx_lo.astype(jnp.float64)
-                    val = xs[idx_lo] * (1.0 - a) + xs[idx_lo + 1] * a
+                    dt_typ = jnp.maximum((t_end - t_start) / jnp.maximum(n_pts - 1, 1), 1e-12)
+                    sigma = 2.0 * dt_typ
+                    alpha = 0.5 / (sigma * sigma)
+                    d = ts - t_clip
+                    gw = jnp.exp(-alpha * d * d)
+                    gw_sum = jnp.sum(gw)
+                    gw = gw / (gw_sum + 1e-12)
+                    val = jnp.sum(xs * gw[:, None], axis=0)
                     y_accum += mask * val
                     w_accum += mask
                 return y_accum / (w_accum + 1e-8)
@@ -826,22 +724,9 @@ class DAEMatrixGradient:
         kernel = self._get_gradient_kernel(structure)
 
         # 3. Compute
-        loss_val, grad_p = kernel(W_flat, p_val, grid_taus_tuple, target_times, target_data, t_final, blend_sharpness)
+        grad_p = kernel(W_flat, p_val, grid_taus_tuple, target_times, target_data, t_final, blend_sharpness)
 
-        return loss_val, grad_p
-
-    def predict_trajectory(self, sol, target_times, blend_sharpness=150.0):
-        """
-        Predict trajectory values at target times using the JIT compiled kernel.
-        """
-        t_final = sol.segments[-1].t[-1] if sol.segments else 2.0
-        W_flat, structure, grid_taus_list = self.pack_solution(sol)
-        grid_taus_tuple = tuple(grid_taus_list)
-        
-        kernel = self._get_prediction_kernel(structure)
-        
-        y_pred = kernel(W_flat, grid_taus_tuple, target_times, t_final, blend_sharpness)
-        return y_pred
+        return grad_p
 
     def optimize_adam(self, solver, p_init, opt_param_indices, target_times, target_data,
                       t_span, ncp, max_iter=150, tol=1e-8, step_size=0.01,
@@ -874,14 +759,15 @@ class DAEMatrixGradient:
                 break
                 
             # Compute Gradient
-            loss_val_d, total_grad = self.compute_total_gradient(sol, p_current, target_times, target_data, blend_sharpness)
+            total_grad = self.compute_total_gradient(sol, p_current, target_times, target_data, blend_sharpness)
             total_grad.block_until_ready()
             
             grad_opt = total_grad[jnp.array(opt_param_indices)]
             grad_norm = float(jnp.linalg.norm(grad_opt))
             
-            # Extract scalar loss
-            loss_val = float(loss_val_d)
+            # Loss (Cheap way: just extract from grad calculation? No, we need separate call or return it)
+            # For now, just log gradient.
+            loss_val = 0.0 # Placeholder or re-run prediction
             
             loss_history.append(loss_val)
             grad_norm_history.append(grad_norm)
@@ -898,7 +784,7 @@ class DAEMatrixGradient:
             elapsed = (time.perf_counter() - t0) * 1000.0
 
             if it % print_every == 0 or it == 1:
-                print(f"  Iter {it:4d} | loss={loss_val:.6e} | |grad|={grad_norm:.6e} | p={np.asarray(p_current[jnp.array(opt_param_indices)])} | {elapsed:.1f} ms")
+                print(f"  Iter {it:4d} | |grad|={grad_norm:.6e} | p={np.asarray(p_current[jnp.array(opt_param_indices)])} | {elapsed:.1f} ms")
 
             if grad_norm < tol:
                 converged = True

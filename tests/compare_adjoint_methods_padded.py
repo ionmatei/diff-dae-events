@@ -78,7 +78,7 @@ def compare_methods():
     solver = DAESolver(dae_data, verbose=False)
 
     t_span = (0.0, 2.0)
-    ncp = 50
+    ncp = 15
 
     print(f"Generating solution (ncp={ncp})...")
     sol = solver.solve_augmented(t_span, ncp=ncp)

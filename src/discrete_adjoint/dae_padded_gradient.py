@@ -5,8 +5,9 @@ config.update("jax_enable_x64", True)
 import numpy as np
 
 # Import the padded sweep function
-import re
-from functools import partial
+from src.discrete_adjoint.utils import create_jax_functions, compute_adjoint_sweep_padded
+
+
 
 class DAEPaddedGradient:
     def __init__(self, dae_data, max_blocks=50, max_pts=500, max_targets=200):
@@ -25,7 +26,7 @@ class DAEPaddedGradient:
         self.max_targets = max_targets
 
         # Create JAX functions
-        self.funcs = self._create_jax_functions(dae_data)
+        self.funcs = create_jax_functions(dae_data)
         self.f_fn, self.g_fn, self.h_fn, self.guard_fn, self.reinit_res_fn, self.reinit_vars, self.dims = self.funcs
 
         # Pre-allocate persistent host-side buffers to avoid repeated np.zeros()
@@ -49,7 +50,7 @@ class DAEPaddedGradient:
         _max_blocks = max_blocks
 
         def _sweep_closed(W, TS, p, bt, bi, bp, dW, dp):
-            return DAEPaddedGradient._compute_adjoint_sweep_padded(
+            return compute_adjoint_sweep_padded(
                 W, TS, p, bt, bi, bp, dW, dp, _funcs, _dims, _max_blocks
             )
         self.jit_sweep = jax.jit(_sweep_closed)
@@ -57,20 +58,21 @@ class DAEPaddedGradient:
         # JIT Compile the Loss Gradient (for individual use if needed)
         self.jit_loss_grad = jax.jit(
             jax.grad(self._loss_fn_padded, argnums=[0, 1, 5]),
-            static_argnames=['n_x', 'adaptive_horizon']
+            static_argnames=['n_x', 'adaptive_horizon', 'soft_interp']
         )
 
         # JIT Compile the Unified Total Gradient Kernel
         print("Compiling Unified Gradient JIT kernel...")
         def _total_grad_closed(W_p, TS_p, p_val, b_types, b_indices, b_param,
                                target_times, target_data, n_targets, t_final, blend_sharpness,
-                               adaptive_horizon=False):
+                               adaptive_horizon=False, soft_interp=True):
             return DAEPaddedGradient._total_gradient_kernel(
                 W_p, TS_p, p_val, b_types, b_indices, b_param,
                 target_times, target_data, n_targets, t_final, blend_sharpness,
-                _funcs, _dims, _max_blocks, adaptive_horizon=adaptive_horizon
+                _funcs, _dims, _max_blocks, adaptive_horizon=adaptive_horizon,
+                soft_interp=soft_interp
             )
-        self.jit_total_grad = jax.jit(_total_grad_closed, static_argnames=['adaptive_horizon'])
+        self.jit_total_grad = jax.jit(_total_grad_closed, static_argnames=['adaptive_horizon', 'soft_interp'])
         
         # Trigger compilation with dummy data
         # (Optional, but ensures first call is fast)
@@ -114,100 +116,6 @@ class DAEPaddedGradient:
         )
         print("Compilation complete.")
 
-    def _create_jax_functions(self, dae_data):
-        state_names = [s['name'] for s in dae_data['states']]
-        alg_names = [a['name'] for a in dae_data.get('alg_vars', [])]
-        param_names = [p['name'] for p in dae_data['parameters']]
-        
-        # Compile f
-        f_eqs = dae_data['f']
-        f_exprs = [eq.split('=', 1)[1].strip() if '=' in eq else eq for eq in f_eqs]
-                
-        # Compile g
-        g_eqs = dae_data.get('g', [])
-        g_exprs = []
-        for eq in g_eqs:
-            if '=' in eq:
-                lhs, rhs = eq.split('=', 1)
-                g_exprs.append(f"({lhs.strip()}) - ({rhs.strip()})")
-            else:
-                g_exprs.append(eq)
-                
-        # Compile Guard & Reinit
-        when_clauses = dae_data.get('when', [])
-        guard_exprs = []
-        reinit_exprs = [] 
-        reinit_vars = [] 
-        
-        for wc in when_clauses:
-            cond = wc['condition']
-            if '<' in cond: lhs, rhs = cond.split('<', 1)
-            elif '>' in cond: lhs, rhs = cond.split('>', 1)
-            else: lhs, rhs = cond.split('=', 1)
-            guard_exprs.append(f"({lhs}) - ({rhs})")
-            
-            reinit_str = wc['reinit']
-            if '=' in reinit_str:
-                lhs, rhs = reinit_str.split('=', 1)
-                raw_expr = f"({lhs}) - ({rhs})"
-                lhs_clean = lhs
-                for i, name in enumerate(state_names):
-                        if re.search(r'\b' + re.escape(name) + r'\b', lhs_clean):
-                            reinit_vars.append(('state', i))
-                            break
-            else:
-                raw_expr = reinit_str 
-            reinit_exprs.append(raw_expr)
-        
-        h_exprs = dae_data.get('h', [])
-        use_default_h = (len(h_exprs) == 0)
-        
-        def compile_to_jax(expr_list, is_reinit=False):
-            if not expr_list:
-                if is_reinit: return lambda t, xp, zp, x, z, p: jnp.array([])
-                else: return lambda t, x, z, p: jnp.array([])
-                
-            subs = []
-            for i, n in enumerate(state_names): 
-                target = f"x_post[{i}]" if is_reinit else f"x[{i}]"
-                subs.append((n, target))
-            for i, n in enumerate(alg_names):
-                target = f"z_post[{i}]" if is_reinit else f"z[{i}]"
-                subs.append((n, target))
-            for i, n in enumerate(param_names): subs.append((n, f"p[{i}]"))
-            subs.append(('time', 't'))
-            subs.sort(key=lambda x: len(x[0]), reverse=True)
-            
-            jax_exprs = []
-            for e in expr_list:
-                final_e = e
-                if is_reinit:
-                    def replace_prev(match):
-                        var = match.group(1)
-                        if var in state_names: return f"x_pre[{state_names.index(var)}]"
-                        if var in alg_names: return f"z_pre[{alg_names.index(var)}]"
-                        return f"prev_{var}"
-                    final_e = re.sub(r'prev\s*\(\s*(\w+)\s*\)', replace_prev, final_e)
-                
-                for name, repl in subs:
-                    pattern = r'(?<!\.)\b' + re.escape(name) + r'\b'
-                    final_e = re.sub(pattern, repl, final_e)
-                jax_exprs.append(final_e)
-                
-            args = "t, x_post, z_post, x_pre, z_pre, p" if is_reinit else "t, x, z, p"
-            code = f"def func({args}): return jnp.array([{', '.join(jax_exprs)}])"
-            local_scope = {'jnp': jnp}
-            exec(code, local_scope)
-            return local_scope['func']
-
-        f_fn = compile_to_jax(f_exprs, False)
-        g_fn = compile_to_jax(g_exprs, False)
-        guard_fn = compile_to_jax(guard_exprs, False)
-        reinit_res_fn = compile_to_jax(reinit_exprs, True)
-        h_fn = lambda t, x, z, p: x if use_default_h else compile_to_jax(h_exprs, False)(t, x, z, p)
-
-        return f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, tuple(reinit_vars), (len(state_names), len(alg_names), len(param_names))
-
     def _pad_problem_data(self, ts_all, ys_all, event_infos):
         """
         Converts dynamic trajectory data into padded fixed-size arrays.
@@ -234,52 +142,24 @@ class DAEPaddedGradient:
                 raise ValueError(f"Segment {i} points {n_pts} > max_pts {self.max_pts}")
                 
             W_padded[curr_blk, :n_pts, :] = ys_all[i]
-            # Store normalized tau (0..1) instead of absolute times.
-            # Actual times are reconstructed inside JIT kernels from
-            # tau and the event-time bounds in b_param, so that
-            # gradients propagate through event times.
-            t0_seg = ts_all[i][0]
-            t1_seg = ts_all[i][-1]
-            denom = t1_seg - t0_seg
-            if abs(denom) < 1e-12:
-                denom = 1.0
-            TS_padded[curr_blk, :n_pts] = (ts_all[i] - t0_seg) / denom
+            TS_padded[curr_blk, :n_pts] = ts_all[i]
             block_types[curr_blk] = 1 # Segment
-            block_indices[curr_blk] = [0, n_pts]
+            block_indices[curr_blk] = [0, n_pts] 
             curr_blk += 1
-
+            
             # 2. Event
             if i < n_evs:
-                if curr_blk >= self.max_blocks:
+                if curr_blk >= self.max_blocks: 
                     raise ValueError(f"Exceeded max_blocks ({self.max_blocks}) during event")
-
+                
                 ev_t = event_infos[i]
                 block_types[curr_blk] = 2 # Event
-                block_indices[curr_blk] = [0, 1]
+                block_indices[curr_blk] = [0, 1] 
                 block_param[curr_blk] = ev_t
-                TS_padded[curr_blk, 0] = 0.0  # not used for events
+                TS_padded[curr_blk, 0] = ev_t
                 curr_blk += 1
                 
         return W_padded, TS_padded, block_types, block_indices, block_param, dL_padded
-
-    def _reconstruct_abs_times(self, TS_tau, b_types, b_param, sol):
-        """Reconstruct absolute times from normalized tau grid (numpy, Python-side).
-
-        Used before passing to the adjoint sweep which expects actual times.
-        """
-        TS_abs = np.array(TS_tau, copy=True)
-        t_final = sol.segments[-1].t[-1] if sol.segments else 0.0
-        for i in range(self.max_blocks):
-            if b_types[i] == 0:
-                break
-            if b_types[i] == 1:  # segment
-                lower = b_param[i - 1] if (i > 0 and b_types[i - 1] == 2) else 0.0
-                upper = b_param[i + 1] if (i + 1 < self.max_blocks and b_types[i + 1] == 2) else t_final
-                n_pts = int(np.sum(TS_tau[i] > 0)) + 1  # tau[0]==0 is valid
-                # Actually use block_indices for accurate count — but we don't
-                # have it here.  Simpler: reconstruct the whole row.
-                TS_abs[i] = lower + TS_tau[i] * (upper - lower)
-        return TS_abs
 
     def _pad_targets(self, target_times, target_data):
         """Pad target arrays to fixed (max_targets,) shape for stable JIT compilation."""
@@ -293,299 +173,23 @@ class DAEPaddedGradient:
         return tt, td, n_targets
 
     @staticmethod
-    @partial(jax.jit, static_argnames=['funcs', 'dims'])
-    def _solve_local_step_adjoint_jit(w_c, w_n, t_c, t_n, load_at_n, funcs, dims, p_opt):
-        """Solves for lambda_k and computes partial_load_k."""
-        f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, reinit_vars, dims = funcs
-        n_x, n_z, n_p = dims
-
-        def boundary_res(w_n_var):
-            xn, zn = w_n_var[:n_x], w_n_var[n_x:]
-            fn_val = f_fn(t_n, xn, zn, p_opt)
-            h_step = t_n - t_c
-            r_flow = -xn + (h_step/2.0) * fn_val
-            r_alg = g_fn(t_n, xn, zn, p_opt)
-            return jnp.concatenate([r_flow, r_alg])
-            
-        J = jax.jacrev(boundary_res)(w_n)
-        lam_combined = jnp.linalg.solve(J.T, -load_at_n)
-        lam_flow = lam_combined[:n_x]
-        
-        def flow_res_c(w_c_var):
-            xc, zc = w_c_var[:n_x], w_c_var[n_x:]
-            fc_val = f_fn(t_c, xc, zc, p_opt)
-            h_step = t_n - t_c
-            return xc + (h_step/2.0) * fc_val
-            
-        _, vjp_fun = jax.vjp(flow_res_c, w_c)
-        partial_load_k = vjp_fun(lam_flow)[0]
-        
-        def step_res_p(p_var):
-            xc, zc = w_c[:n_x], w_c[n_x:]
-            xn, zn = w_n[:n_x], w_n[n_x:]
-            h_step = t_n - t_c
-            fc = f_fn(t_c, xc, zc, p_var)
-            fn = f_fn(t_n, xn, zn, p_var)
-            r_f = -xn + xc + (h_step/2.0)*(fc + fn)
-            r_a = g_fn(t_n, xn, zn, p_var)
-            return jnp.concatenate([r_f, r_a])
-            
-        _, vjp_p = jax.vjp(step_res_p, p_opt)
-        grad_p_step = vjp_p(lam_combined)[0]
-        
-        return grad_p_step, lam_combined, partial_load_k
-
-    @staticmethod
-    @partial(jax.jit, static_argnames=['funcs', 'dims'])
-    def _solve_event_system_affine_jit(t_event, w_prev_end, w_post_start, adjoint_state, dL_t, mesh_sens_prev, funcs, dims, p_opt):
-        """Computes Affine coefficients for Event Multipliers."""
-        f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, reinit_vars, _ = funcs
-        n_x, n_z, n_p = dims
-
-        def event_res_fn(t, xp, xpr, p):
-            x_p, z_p = xp[:n_x], xp[n_x:]
-            x_r, z_r = xpr[:n_x], xpr[n_x:]
-            r_g = guard_fn(t, x_r, z_r, p)[0:1]
-            r_r = reinit_res_fn(t, x_p, z_p, x_r, z_r, p)
-            r_c = []
-            for k in range(n_x):
-                is_r = False
-                for (type_, idx_) in reinit_vars:
-                        if type_=='state' and idx_==k: is_r=True
-                if not is_r: r_c.append(x_p[k:k+1] - x_r[k:k+1])
-            r_a = g_fn(t, x_p, z_p, p) if n_z > 0 else jnp.array([])
-            return jnp.concatenate([r_g, r_r] + r_c + [r_a])
-
-        J_xp = jax.jacfwd(lambda xp: event_res_fn(t_event, xp, w_prev_end, p_opt))(w_post_start)
-        J_t_partial = jax.jacfwd(lambda t: event_res_fn(t, w_post_start, w_prev_end, p_opt))(t_event)
-        J_xpr = jax.jacfwd(lambda xpr: event_res_fn(t_event, w_post_start, xpr, p_opt))(w_prev_end)
-        
-        J_te_total = J_t_partial.reshape((-1, 1))
-
-        matrix_for_mu = J_xp.T
-        mu_0, residuals, rank, s = jnp.linalg.lstsq(matrix_for_mu, -adjoint_state, rcond=1e-9)
-        Q, _ = jax.scipy.linalg.qr(J_xp, mode='full')
-        v_null = Q[:, -1]
-        
-        t_e_rhs_base = dL_t + mesh_sens_prev + jnp.dot(mu_0, J_te_total.flatten())
-        t_e_slope    = jnp.dot(v_null, J_te_total.flatten())
-        
-        load_prev_mu0 = J_xpr.T @ mu_0
-        load_prev_v   = J_xpr.T @ v_null
-        
-        _, vjp_p = jax.vjp(lambda p: event_res_fn(t_event, w_post_start, w_prev_end, p), p_opt)
-        gp_mu0 = vjp_p(mu_0)[0]
-        gp_v   = vjp_p(v_null)[0]
-        
-        return (load_prev_mu0, load_prev_v, t_e_rhs_base, t_e_slope, gp_mu0, gp_v, mu_0, v_null)
-
-    @staticmethod
-    @partial(jax.jit, static_argnames=['funcs', 'dims'])
-    def _run_segment_backward_sweep(w_nodes, ts, dL_nodes, load_at_end, n_pts_valid, funcs, dims, p_opt):
-        """Backward sweep for a single segment (JIT compatible) with Padding Support."""
-        f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, reinit_vars, dims = funcs
-        n_x, n_z, n_p = dims
-        
-        dL_terminal = dL_nodes[n_pts_valid - 1]
-        init_load = dL_terminal + load_at_end
-        
-        scan_ws_c = w_nodes[:-1][::-1]
-        scan_ws_n = w_nodes[1:][::-1]
-        scan_ts_c = ts[:-1][::-1]
-        scan_ts_n = ts[1:][::-1]
-        scan_dLs = dL_nodes[:-1][::-1] 
-        
-        max_steps = w_nodes.shape[0] - 1
-        indices_reversed = jnp.arange(max_steps)
-        mask_valid = indices_reversed >= (max_steps + 1 - n_pts_valid)
-        scan_mask = mask_valid
-        
-        t0 = ts[0]
-        tf = ts[n_pts_valid - 1]
-        duration = tf - t0
-        dur_inv = jnp.where(jnp.abs(duration) < 1e-12, 0.0, 1.0/duration)
-        
-        init_carry = (init_load, 0.0, 0.0, 0.0)
-        
-        def scan_body_seg(carry, inputs):
-            w_c, w_n, t_c, t_n, dL_at_n, is_valid = inputs
-            load_n, _, gTs, gTe = carry
-            
-            def branch_valid(_):
-                grad_p_step, lam_k, partial_load_k = DAEPaddedGradient._solve_local_step_adjoint_jit(
-                     w_c, w_n, t_c, t_n, load_n, funcs, dims, p_opt
-                )
-                next_load = partial_load_k + dL_at_n
-                
-                def dot_res_t(t_c_val, t_n_val):
-                     xn, zn = w_n[:n_x], w_n[n_x:]
-                     xc, zc = w_c[:n_x], w_c[n_x:]
-                     fc = f_fn(t_c_val, xc, zc, p_opt)
-                     fn = f_fn(t_n_val, xn, zn, p_opt)
-                     h_var = t_n_val - t_c_val
-                     r_flow = -xn + xc + (h_var/2.0)*(fc + fn)
-                     r_alg = g_fn(t_n_val, xn, zn, p_opt) if n_z > 0 else jnp.array([])
-                     lam_f = lam_k[:n_x]
-                     lam_a = lam_k[n_x:] if n_z > 0 else jnp.array([])
-                     term = jnp.dot(r_flow, lam_f)
-                     if n_z>0: term += jnp.dot(r_alg, lam_a)
-                     return term
-                     
-                d_tc, d_tn = jax.grad(dot_res_t, argnums=(0, 1))(t_c, t_n)
-                tau_c = (t_c - t0) * dur_inv
-                tau_n = (t_n - t0) * dur_inv
-                inc_start = d_tc * (1.0 - tau_c) + d_tn * (1.0 - tau_n)
-                inc_end   = d_tc * tau_c         + d_tn * tau_n
-                
-                return (next_load, 0.0, gTs + inc_start, gTe + inc_end), grad_p_step
-
-            def branch_invalid(_):
-                zeros_p = jnp.zeros(n_p)
-                return (load_n, 0.0, gTs, gTe), zeros_p
-
-            result = jax.lax.cond(is_valid, branch_valid, branch_invalid, operand=None)
-            return result
-
-        inputs = (scan_ws_c, scan_ws_n, scan_ts_c, scan_ts_n, scan_dLs, scan_mask)
-        final_carry, grads_p = jax.lax.scan(scan_body_seg, init_carry, inputs)
-        
-        sens_w0 = final_carry[0]
-        total_gp = jnp.sum(grads_p, axis=0)
-        total_gTs = final_carry[2]
-        total_gTe = final_carry[3]
-        
-        return sens_w0, total_gp, total_gTs, total_gTe
-
-    @staticmethod
-    @partial(jax.jit, static_argnames=['funcs', 'dims', 'max_blocks'])
-    def _compute_adjoint_sweep_padded(
-        W_padded, TS_padded, p_opt, 
-        block_types, block_indices, block_param,
-        dL_padded, dL_dp,
-        funcs, dims, max_blocks,
-        dL_db_param=None
-    ):
-        f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, reinit_vars, dims = funcs
-        n_x, n_z, n_p = dims
-        
-        init_adjoint = jnp.zeros(n_x + n_z)
-        init_mesh_sens = 0.0
-        init_grad_p = dL_dp
-        n_mu_max = n_x + n_z + 1
-        
-        init_pending = (
-            0.0, jnp.zeros(n_mu_max), jnp.zeros(n_mu_max), 
-            jnp.zeros(n_x + n_z), jnp.zeros(n_x + n_z), 
-            0.0, 0.0, jnp.zeros(n_p), jnp.zeros(n_p)
-        )
-        init_carry = (init_adjoint, init_mesh_sens, init_grad_p, init_pending)
-        scan_indices = jnp.arange(max_blocks)[::-1]
-        
-        def scan_body(carry, block_idx):
-            adj_load, mesh_sens, grad_p, pending = carry
-            b_type = block_types[block_idx]
-            W_block = W_padded[block_idx]
-            T_block = TS_padded[block_idx]
-            dL_block = dL_padded[block_idx]
-            n_pts_valid = block_indices[block_idx, 1] 
-            
-            def case_pad(c_args):
-                return c_args[0], c_args[1], c_args[2], c_args[3]
-                
-            def case_segment(c_args):
-                curr_adj, curr_mesh, curr_gp, curr_pend = c_args
-                pending_active = curr_pend[0]
-                
-                def branch_joint_solve(args):
-                    p_adj, p_mesh, p_gp, p_pend = args
-                    _, mu_0, v_null, lp_mu0, lp_v, te_rhs, te_slope, gp_mu0, gp_v = p_pend
-                    dL_zeros = jnp.zeros_like(dL_block)
-                    dL_stack = jnp.stack([dL_block, dL_zeros])
-                    load_stack = jnp.stack([lp_mu0, lp_v])
-                    sweep_vmap = jax.vmap(DAEPaddedGradient._run_segment_backward_sweep, in_axes=(None, None, 0, 0, None, None, None, None))
-                    sens_w0_stack, grad_p_stack, grad_ts_stack, grad_te_stack = sweep_vmap(
-                        W_block, T_block, dL_stack, load_stack, n_pts_valid, funcs, dims, p_opt
-                    )
-                    grad_te_mu0 = grad_te_stack[0]
-                    grad_te_v   = grad_te_stack[1]
-                    denom = te_slope + grad_te_v
-                    c_val = -(te_rhs + grad_te_mu0) / (denom + 1e-12)
-                    total_adj = sens_w0_stack[0] + c_val * sens_w0_stack[1]
-                    total_gp_seg = grad_p_stack[0] + c_val * grad_p_stack[1]
-                    inc_gp = gp_mu0 + c_val * gp_v + total_gp_seg
-                    new_mesh = grad_ts_stack[0] + c_val * grad_ts_stack[1]
-                    new_pend = init_pending
-                    return total_adj, new_mesh, p_gp + inc_gp, new_pend
-
-                def branch_standard_solve(args):
-                    p_adj, p_mesh, p_gp, p_pend = args
-                    sens_w0, grad_p_seg, grad_ts, grad_te = DAEPaddedGradient._run_segment_backward_sweep(
-                        W_block, T_block, dL_block, p_adj, n_pts_valid, funcs, dims, p_opt
-                    )
-                    return sens_w0, grad_ts, p_gp + grad_p_seg, p_pend
-                    
-                return jax.lax.cond(pending_active > 0.5, branch_joint_solve, branch_standard_solve, c_args)
-
-            def case_event(c_args):
-                 curr_adj, curr_mesh, curr_gp, curr_pend = c_args
-                 prev_block_idx = block_idx - 1 
-                 next_block_idx = block_idx + 1 
-                 w_pre_seg = W_padded[prev_block_idx]
-                 n_pts_pre = block_indices[prev_block_idx, 1]
-                 w_prev_end = w_pre_seg[n_pts_pre - 1] 
-                 w_post_seg = W_padded[next_block_idx]
-                 w_post_start = w_post_seg[0]
-                 t_event = block_param[block_idx] 
-                 if dL_db_param is not None:
-                     dL_t = dL_db_param[block_idx]
-                 else:
-                     dL_t = dL_block[0, 0] 
-                 
-                 tuple_res = DAEPaddedGradient._solve_event_system_affine_jit(
-                     t_event, w_prev_end, w_post_start, curr_adj, dL_t, curr_mesh, funcs, dims, p_opt
-                 )
-                 lp_mu0, lp_v, rhs, slope, gp_mu0, gp_v, mu_0, v_null = tuple_res
-                 new_pending = (1.0, mu_0, v_null, lp_mu0, lp_v, rhs, slope, gp_mu0, gp_v)
-                 zeros_adj = jnp.zeros_like(curr_adj)
-                 return zeros_adj, curr_mesh, curr_gp, new_pending
-                 
-            new_carry = jax.lax.switch(b_type, [case_pad, case_segment, case_event], carry)
-            return new_carry, None
-
-        final_carry, _ = jax.lax.scan(scan_body, init_carry, scan_indices)
-        return final_carry[2]
-
-    @staticmethod
-    def _total_gradient_kernel(W_p, TS_p, p_val, b_types, b_indices, b_param, target_times, target_data, n_targets, t_final, blend_sharpness, funcs, dims, max_blocks, adaptive_horizon=False):
+    def _total_gradient_kernel(W_p, TS_p, p_val, b_types, b_indices, b_param, target_times, target_data, n_targets, t_final, blend_sharpness, funcs, dims, max_blocks, adaptive_horizon=False, soft_interp=True):
         """Unified JIT kernel: Loss Differentiation + Adjoint Sweep."""
         n_x, n_z, n_p = dims
 
         # 1. Compute Loss and Gradients simultaneously
-        #    TS_p contains normalized tau; _loss_fn_padded → _predict_trajectory_padded_kernel
-        #    reconstructs actual times from tau + b_param inside the differentiable graph.
         (loss_val, (dL_dW_p, dL_dp, dL_db_param)) = jax.value_and_grad(
-            DAEPaddedGradient._loss_fn_padded,
+            DAEPaddedGradient._loss_fn_padded, 
             argnums=[0, 1, 5]
         )(
             W_p, p_val, TS_p, b_types, b_indices, b_param,
             target_times, target_data, n_targets, t_final, blend_sharpness, n_x,
-            adaptive_horizon=adaptive_horizon
+            adaptive_horizon=adaptive_horizon, soft_interp=soft_interp
         )
-
-        # 2. Reconstruct absolute times for adjoint sweep (not differentiated)
-        _blk = jnp.arange(max_blocks)
-        _prev = jnp.maximum(_blk - 1, 0)
-        _next = jnp.minimum(_blk + 1, max_blocks - 1)
-        _lower = jnp.where(
-            jnp.logical_and(_blk > 0, b_types[_prev] == 2),
-            b_param[_prev], 0.0)
-        _upper = jnp.where(
-            b_types[_next] == 2, b_param[_next], t_final)
-        TS_abs = _lower[:, None] + TS_p * (_upper - _lower)[:, None]
-
-        # 3. Call Adjoint Sweep (uses module-level import)
-        total_grad = DAEPaddedGradient._compute_adjoint_sweep_padded(
-            W_p, TS_abs, p_val,
+        
+        # 2. Call Adjoint Sweep (uses module-level import)
+        total_grad = compute_adjoint_sweep_padded(
+            W_p, TS_p, p_val,
             b_types, b_indices, b_param,
             dL_dW_p, dL_dp,
             funcs, dims, max_blocks,
@@ -594,13 +198,8 @@ class DAEPaddedGradient:
         return loss_val, total_grad
 
     @staticmethod
-    def _predict_trajectory_padded_kernel(W_p, TS_p, b_types, b_indices, b_param, target_times, t_final, blend_sharpness, n_x):
-        """JITable version of trajectory prediction using padded arrays.
-
-        TS_p contains normalized tau values (0..1).  Actual times are
-        reconstructed as  lower + tau * (upper - lower)  so that gradients
-        flow through the event times stored in b_param.
-        """
+    def _predict_trajectory_padded_kernel(W_p, TS_p, b_types, b_indices, b_param, target_times, t_final, blend_sharpness, n_x, soft_interp=True):
+        """JITable version of trajectory prediction using padded arrays."""
         max_blocks = W_p.shape[0]
         block_idx = jnp.arange(max_blocks)
 
@@ -615,17 +214,25 @@ class DAEPaddedGradient:
             b_types[next_idx] == 2,
             b_param[next_idx], t_final)
 
-        # Reconstruct actual times from tau and event-time bounds
-        seg_span = (upper - lower)[:, None]                            # (max_blocks, 1)
-        TS_actual = lower[:, None] + TS_p * seg_span                   # (max_blocks, max_pts)
-
         n_pts = b_indices[:, 1]                                        # (max_blocks,)
         n_pts_safe = jnp.maximum(n_pts, 2)                             # avoid 0-index issues
-        t_starts = TS_actual[:, 0]                                     # (max_blocks,)
-        t_ends = TS_actual[block_idx, n_pts_safe - 1]                  # (max_blocks,)
+        t_starts = TS_p[:, 0]                                          # (max_blocks,)
+        t_ends = TS_p[block_idx, n_pts_safe - 1]                       # (max_blocks,)
         xs_all = W_p[:, :, :n_x]                                       # (max_blocks, max_pts, n_x)
 
         def _interp_block(ts_row, xs_row, t_c, np_safe):
+            """Interpolate one block at one clipped query time (piecewise-linear, searchsorted)."""
+            mask_padded = (jnp.arange(ts_row.shape[0]) >= np_safe)
+            ts_search = jnp.where(mask_padded, 1e10, ts_row)
+
+            idx = jnp.searchsorted(ts_search, t_c, side='right') - 1
+            idx = jnp.clip(idx, 0, np_safe - 2)
+            t0, t1 = ts_row[idx], ts_row[idx + 1]
+            denom = jnp.where(jnp.abs(t1 - t0) < 1e-12, 1e-12, t1 - t0)
+            s = jnp.clip((t_c - t0) / denom, 0.0, 1.0)
+            return xs_row[idx] * (1.0 - s) + xs_row[idx + 1] * s
+
+        def _interp_block_soft(ts_row, xs_row, t_c, np_safe):
             """Soft-weight interpolation: fully differentiable w.r.t. knot times.
 
             Uses Gaussian kernel weights instead of searchsorted so that
@@ -652,6 +259,8 @@ class DAEPaddedGradient:
 
             return jnp.sum(xs_row * w[:, None], axis=0)
 
+        _interp_fn = _interp_block_soft if soft_interp else _interp_block
+
         def predict_single(t_q):
             # Masks for all blocks at once
             mask = (jax.nn.sigmoid(blend_sharpness * (t_q - lower)) *
@@ -661,8 +270,8 @@ class DAEPaddedGradient:
             t_clip = jnp.clip(t_q, t_starts, t_ends)                   # (max_blocks,)
 
             # vmap interpolation over blocks
-            vals = jax.vmap(_interp_block)(
-                TS_actual, xs_all, t_clip, n_pts_safe
+            vals = jax.vmap(_interp_fn)(
+                TS_p, xs_all, t_clip, n_pts_safe
             )                                                           # (max_blocks, n_x)
 
             y_accum = jnp.sum(mask[:, None] * vals, axis=0)            # (n_x,)
@@ -673,7 +282,7 @@ class DAEPaddedGradient:
 
     @staticmethod
     def _loss_fn_padded(W_p, p, TS_p, b_types, b_indices, b_param, target_times, target_data, 
-    n_targets, t_final, blend_sharpness, n_x, adaptive_horizon=False):
+    n_targets, t_final, blend_sharpness, n_x, adaptive_horizon=False, soft_interp=True):
         """JITable loss function with target masking for fixed-shape compilation.
 
         If adaptive_horizon=True, targets beyond t_final are excluded from the
@@ -681,7 +290,8 @@ class DAEPaddedGradient:
         shorter than the reference (e.g. Zeno-like early termination).
         """
         y_pred = DAEPaddedGradient._predict_trajectory_padded_kernel(
-            W_p, TS_p, b_types, b_indices, b_param, target_times, t_final, blend_sharpness, n_x
+            W_p, TS_p, b_types, b_indices, b_param, target_times, t_final, blend_sharpness, n_x,
+            soft_interp=soft_interp
         )
         diff_sq = (y_pred - target_data) ** 2
         mask = (jnp.arange(target_times.shape[0]) < n_targets).astype(jnp.float64)
@@ -834,7 +444,7 @@ class DAEPaddedGradient:
                 
         return jnp.array(W_flat), structure, grid_taus
 
-    def compute_loss_gradients(self, sol, p_opt, target_times, target_data, blend_sharpness=150.0, adaptive_horizon=False):
+    def compute_loss_gradients(self, sol, p_opt, target_times, target_data, blend_sharpness=150.0, adaptive_horizon=False, soft_interp=True):
         """
         Compute gradients of the loss function w.r.t states (W) and parameters (p).
         Self-sufficient and JIT-compiled.
@@ -877,7 +487,7 @@ class DAEPaddedGradient:
             W_p, p_opt, TS_p,
             b_types, b_indices, b_param,
             tt_padded, td_padded, n_tgt, actual_t_final, blend_sharpness, n_x,
-            adaptive_horizon=adaptive_horizon
+            adaptive_horizon=adaptive_horizon, soft_interp=soft_interp
         )
         
         # 4. Map dL_p and dL_db_param back to dL_dW (flat)
@@ -900,7 +510,7 @@ class DAEPaddedGradient:
         
         return dL_dW, dL_dp, structure
 
-    def compute_total_gradient(self, sol, p_val, target_times, target_data, n_targets=None, blend_sharpness=150.0, adaptive_horizon=False):
+    def compute_total_gradient(self, sol, p_val, target_times, target_data, n_targets=None, blend_sharpness=150.0, adaptive_horizon=False, soft_interp=True):
         """
         Compute total parameter gradients in a single unified JIT call.
         This is the most efficient high-level API.
@@ -949,7 +559,7 @@ class DAEPaddedGradient:
             W_p, TS_p, p_val,
             b_types, b_indices, b_param,
             tt_padded, td_padded, n_tgt, actual_t_final, blend_sharpness,
-            adaptive_horizon=adaptive_horizon
+            adaptive_horizon=adaptive_horizon, soft_interp=soft_interp
         )
         
         return loss_val, total_grad
@@ -1001,28 +611,25 @@ class DAEPaddedGradient:
             elif bt == 2:  # event
                 dL_p[i, 0, 0] = dL_dW_np[offsets[i]]
 
-        # 3. Reconstruct absolute times from tau for the adjoint sweep
-        TS_abs = self._reconstruct_abs_times(TS_p, b_types, b_param, sol)
-
-        # 4. Transfer all padded arrays to device in one call
-        W_p, TS_abs, b_types, b_indices, b_param, dL_p = jax.device_put(
-            (W_p, TS_abs, b_types, b_indices, b_param, dL_p)
+        # 3. Transfer all padded arrays to device in one call
+        W_p, TS_p, b_types, b_indices, b_param, dL_p = jax.device_put(
+            (W_p, TS_p, b_types, b_indices, b_param, dL_p)
         )
 
-        # 5. Execute JIT Kernel
+        # 4. Execute JIT Kernel
         grad_total = self.jit_sweep(
-            W_p, TS_abs, p_val,
+            W_p, TS_p, p_val,
             b_types, b_indices, b_param,
             dL_p, dL_dp
         )
-
+        
         return grad_total
 
     def optimize_adam(self, solver, p_init, opt_param_indices, target_times, target_data,
                       t_span, ncp, max_iter=150, tol=1e-8, step_size=0.01,
                       beta1=0.9, beta2=0.999, epsilon=1e-8,
                       blend_sharpness=150.0, print_every=10,
-                      adaptive_horizon=False):
+                      adaptive_horizon=False, soft_interp=True, **kwargs):
         """
         Run Adam optimization over the selected DAE parameters.
 
@@ -1042,6 +649,7 @@ class DAEPaddedGradient:
             epsilon: Small constant for numerical stability
             blend_sharpness: Sharpness for sigmoid blending in loss
             print_every: Print progress every N iterations
+            **kwargs: Additional arguments passed to solver.solve_augmented (e.g., atol, rtol)
 
         Returns:
             dict with keys:
@@ -1077,7 +685,7 @@ class DAEPaddedGradient:
             # --- Forward simulation ---
             solver.update_parameters(np.asarray(p_current))
             try:
-                sol = solver.solve_augmented(t_span, ncp=ncp)
+                sol = solver.solve_augmented(t_span, ncp=ncp, **kwargs)
             except Exception as e:
                 print(f"  Iter {it}: solver failed — {e}")
                 break
@@ -1087,7 +695,8 @@ class DAEPaddedGradient:
                 sol, p_current, 
                 tt_device, td_device, n_targets=n_tgt_device, # Pass pre-padded device arrays
                 blend_sharpness=blend_sharpness,
-                adaptive_horizon=adaptive_horizon
+                adaptive_horizon=adaptive_horizon,
+                soft_interp=soft_interp
             )
             total_grad.block_until_ready()
             

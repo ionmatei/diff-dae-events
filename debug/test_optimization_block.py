@@ -25,7 +25,7 @@ sys.path.append(root_dir)
 sys.path.append(os.path.join(root_dir, 'src'))
 
 from src.discrete_adjoint.dae_solver import DAESolver
-from debug.dae_padded_gradient import DAEPaddedGradient
+from dae_padded_gradient import DAEPaddedGradient
 
 
 def load_config(config_path):
@@ -84,6 +84,7 @@ def run_optimization_test():
     max_blocks = opt_cfg['max_blocks']
     max_pts = opt_cfg['max_points_per_segment']
     max_targets = opt_cfg['max_targets']
+    downsample_segments = opt_cfg.get('downsample_segments', False)
 
     # Resolve optimized parameter indices
     param_names = [p['name'] for p in dae_data['parameters']]
@@ -112,7 +113,7 @@ def run_optimization_test():
     # --- 3. Biased initial guess ---
     bias = {
         'g': -2.0,   # 9.81 -> ~10.61
-        'e': 0.1,  # 0.8  -> 0.65
+        'e': -0.15,  # 0.8  -> 0.65
     }
     p_init = list(true_p)
     for name in opt_param_names:
@@ -123,7 +124,8 @@ def run_optimization_test():
 
     # --- 4. Build gradient computer and run optimizer ---
     grad_computer = DAEPaddedGradient(
-        dae_data, max_blocks=max_blocks, max_pts=max_pts, max_targets=max_targets
+        dae_data, max_blocks=max_blocks, max_pts=max_pts, max_targets=max_targets,
+        downsample_segments=downsample_segments
     )
 
     result = grad_computer.optimize_adam(
@@ -142,8 +144,7 @@ def run_optimization_test():
         epsilon=epsilon,
         blend_sharpness=blend_sharpness,
         print_every=print_every,
-        adaptive_horizon=False,
-        soft_interp=True
+        adaptive_horizon=False
     )
 
     # --- 5. Report ---
@@ -182,37 +183,70 @@ def run_optimization_test():
     sim_t = np.concatenate(sim_t)
     sim_x = np.concatenate(sim_x)
 
+    # Compute interpolated values for comparison
+    # Use the same blend sharpness as optimization
+    print(f"Interpolating optimized solution at {len(target_times)} target points...")
+    y_pred = grad_computer.predict_trajectory(
+        sol_opt, target_times, blend_sharpness=blend_sharpness
+    )
+    # y_pred is JAX array (n_targets, n_x) -> convert to numpy
+    y_pred_np = np.asarray(y_pred)
+
     # Prepare figure
     fig = plt.figure(figsize=(14, 10))
+    # Grid layout: 2 rows, 2 columns.
+    # Top row: State 0 (Height), State 1 (Velocity)
+    # Bottom row: Loss, Gradient Norm
     gs = fig.add_gridspec(2, 2)
 
-    # Subplot 1: Trajectory (Target vs Optimized)
-    ax1 = fig.add_subplot(gs[0, :])
-    
-    # Plot optimized trajectory (all states)
+    # --- Plot State 0 (Height) ---
+    ax_h = fig.add_subplot(gs[0, 0])
+    i = 0
     colors = ['b', 'g', 'r', 'c', 'm', 'y']
-    for i in range(n_x):
+    label = dae_data['states'][i]['name']
+    color = colors[i % len(colors)]
+    
+    # 1. Sim
+    ax_h.plot(sim_t, sim_x[:, i], color=color, alpha=0.3, label=f'{label} (Sim)')
+    # 2. Target
+    ax_h.plot(target_times, target_data[:, i], 'x', color=color, markersize=6, alpha=0.5, label=f'{label} (Target)')
+    # 3. Interp
+    ax_h.plot(target_times, y_pred_np[:, i], '.', color=color, markersize=4, label=f'{label} (Interp)')
+    
+    ax_h.set_xlabel('Time')
+    ax_h.set_ylabel(f'{label}')
+    ax_h.set_title(f'State: {label}')
+    ax_h.legend()
+    ax_h.grid(True, alpha=0.3)
+
+    # --- Plot State 1 (Velocity) ---
+    ax_v = fig.add_subplot(gs[0, 1])
+    i = 1 
+    # Check if state 1 exists (robustness)
+    if n_x > 1:
         label = dae_data['states'][i]['name']
         color = colors[i % len(colors)]
-        # Plot simulation lines
-        ax1.plot(sim_t, sim_x[:, i], color=color, label=f'{label} (Opt)')
         
-        # Plot target data points
-        # target_data is flattened [x0_t0, x1_t0, ..., x0_t1, x1_t1, ...] ?? 
-        # No, prepare_loss_targets concatenates x arrays.
-        # Check prepare_loss_targets implementation:
-        #   all_x.append(seg.x) -> seg.x shape is (N, n_states)
-        #   target_data = jnp.concatenate(...) -> shape (Total_N, n_states)
-        # So target_data[:, i] is correct.
-        ax1.plot(target_times, target_data[:, i], 'x', color=color, markersize=6, alpha=0.7, label=f'{label} (Target)')
+        # 1. Sim
+        ax_v.plot(sim_t, sim_x[:, i], color=color, alpha=0.3, label=f'{label} (Sim)')
+        # 2. Target
+        ax_v.plot(target_times, target_data[:, i], 'x', color=color, markersize=6, alpha=0.5, label=f'{label} (Target)')
+        # 3. Interp
+        ax_v.plot(target_times, y_pred_np[:, i], '.', color=color, markersize=4, label=f'{label} (Interp)')
+        
+        ax_v.set_xlabel('Time')
+        ax_v.set_ylabel(f'{label}')
+        ax_v.set_title(f'State: {label}')
+        ax_v.legend()
+        ax_v.grid(True, alpha=0.3)
+    else:
+        ax_v.text(0.5, 0.5, "No second state", ha='center', va='center')
 
-    ax1.set_xlabel('Time')
-    ax1.set_ylabel('State Value')
-    ax1.set_title('Trajectory: Target Data vs Optimized Simulation')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
+    # Main Title with Loss
+    final_loss = result['loss_history'][-1]
+    fig.suptitle(f'Trajectory Optimization Results\nFinal Loss: {final_loss:.6e}', fontsize=16)
 
-    # Subplot 2: Loss History
+    # Subplot 3: Loss History
     ax2 = fig.add_subplot(gs[1, 0])
     ax2.plot(result['loss_history'], 'b-', linewidth=2)
     ax2.set_xlabel('Iteration')
@@ -221,7 +255,7 @@ def run_optimization_test():
     ax2.set_yscale('log')
     ax2.grid(True, alpha=0.3)
 
-    # Subplot 3: Gradient Norm History
+    # Subplot 4: Gradient Norm History
     ax3 = fig.add_subplot(gs[1, 1])
     ax3.plot(result['grad_norm_history'], 'r-', linewidth=2)
     ax3.set_xlabel('Iteration')
@@ -230,7 +264,7 @@ def run_optimization_test():
     ax3.set_yscale('log')
     ax3.grid(True, alpha=0.3)
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust for suptitle
     plot_path = os.path.join(current_dir, 'optimization_result_adam.png')
     plt.savefig(plot_path)
     print(f"Plot saved to: {plot_path}")

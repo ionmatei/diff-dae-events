@@ -70,8 +70,8 @@ def run_optimization_test():
     max_blocks = opt_cfg['max_blocks']
     max_pts = opt_cfg['max_points_per_segment']
     max_targets = opt_cfg['max_targets']
-    downsample_segments = opt_cfg.get('downsample_segments', False)
-    all_segments = opt_cfg.get('all_segments', False)
+
+
 
     # Setup
     t_span = (solver_cfg['start_time'], solver_cfg['stop_time'])
@@ -103,7 +103,7 @@ def run_optimization_test():
     print(f"Init Params: {dict(zip(param_names, p_init))}")
     
     # Gradient Computer
-    grad_computer = DAEMatrixGradient(dae_data, max_pts=max_pts, downsample_segments=downsample_segments, all_segments=all_segments)
+    grad_computer = DAEMatrixGradient(dae_data)
     
     # Optimize
     result = grad_computer.optimize_adam(
@@ -127,64 +127,59 @@ def run_optimization_test():
     print(f"Final Params: {dict(zip(param_names, np.asarray(p_opt)))}")
     
     # Plot
-    print("\nGenerating plots...")
     import matplotlib.pyplot as plt
     solver.update_parameters(p_opt)
     sol_opt = solver.solve_augmented(t_span, ncp=ncp)
     
-    # Interpolate using Matrix Gradient computer
-    print(f"Interpolating optimized solution at {len(target_times)} target points...")
-    y_pred = grad_computer.predict_trajectory(
-        sol_opt, target_times, blend_sharpness=blend_sharpness
-    )
-    y_pred_np = np.asarray(y_pred)
+    ts_opt, xs_opt = prepare_loss_targets(sol_opt)
     
-    fig = plt.figure(figsize=(14, 10))
-    gs = fig.add_gridspec(2, 2)
+    plt.figure(figsize=(15, 10))
+    gs = plt.GridSpec(2, 2)
     
-    final_loss = result['loss_history'][-1] if result['loss_history'] else 0.0
-    state_names = [s['name'] for s in dae_data['states']]
-    n_x = len(state_names)
-    
-    # Subplot 1: Height (State 0)
-    ax1 = fig.add_subplot(gs[0, 0])
-    idx = 0
-    if idx < n_x:
-        ax1.plot(target_times, target_data[:, idx], 'kx', label='Target', alpha=0.6)
-        ax1.plot(target_times, y_pred_np[:, idx], 'b-', label='Opt (Interp)')
-        ax1.set_title(f"State: {state_names[idx].capitalize()}", fontsize=12)
-        ax1.grid(True, alpha=0.3)
-        ax1.legend()
+    # Subplot 1: Trajectory
+    ax1 = plt.figure(figsize=(15, 10)).add_subplot(gs[0, :])
+    # Re-get figure to avoid creating new one
+    fig = plt.gcf()
 
-    # Subplot 2: Velocity (State 1)
-    ax2 = fig.add_subplot(gs[0, 1])
-    idx = 1
-    if idx < n_x:
-        ax2.plot(target_times, target_data[:, idx], 'kx', label='Target', alpha=0.6)
-        ax2.plot(target_times, y_pred_np[:, idx], 'r-', label='Opt (Interp)')
-        ax2.set_title(f"State: {state_names[idx].capitalize()}", fontsize=12)
-        ax2.grid(True, alpha=0.3)
+    colors = ['b', 'g', 'r', 'c', 'm', 'y']
+    for i in range(xs_opt.shape[1]):
+        color = colors[i % len(colors)]
+        label = dae_data['states'][i]['name']
+        ax1.plot(ts_opt, xs_opt[:, i], '-', color=color, linewidth=2, label=f'{label} (Opt)')
+        ax1.plot(target_times, target_data[:, i], 'x', color=color, markersize=6, alpha=0.7, label=f'{label} (Target)')
+
+    ax1.set_xlabel('Time')
+    ax1.set_ylabel('State Value')
+    ax1.set_title('Trajectory: Target Data vs Optimized Simulation (Matrix)')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # Subplot 2: Loss History
+    ax2 = fig.add_subplot(gs[1, 0])
+    # Check if loss history has values
+    loss_hist = result['loss_history']
+    if any(loss_hist):
+        ax2.plot(loss_hist, 'b-', linewidth=2)
+        ax2.set_yscale('log')
+    else:
+        ax2.plot(loss_hist, 'b-', linewidth=2, label='(Not computed)')
         ax2.legend()
         
-    # Subplot 3: Loss History
-    ax3 = fig.add_subplot(gs[1, 0])
-    ax3.plot(result['loss_history'], 'b-', linewidth=1.5)
-    ax3.set_yscale('log')
-    ax3.set_title(f"Loss History (Final: {final_loss:.2e})", fontsize=12)
+    ax2.set_xlabel('Iteration')
+    ax2.set_ylabel('Loss')
+    ax2.set_title('Loss History')
+    ax2.grid(True, alpha=0.3)
+
+    # Subplot 3: Gradient Norm History
+    ax3 = fig.add_subplot(gs[1, 1])
+    ax3.plot(result['grad_norm_history'], 'r-', linewidth=2)
     ax3.set_xlabel('Iteration')
-    ax3.grid(True, alpha=0.3, which='both')
+    ax3.set_ylabel('Gradient Norm')
+    ax3.set_title('Gradient Norm History')
+    ax3.set_yscale('log')
+    ax3.grid(True, alpha=0.3)
 
-    # Subplot 4: Gradient Norm History
-    ax4 = fig.add_subplot(gs[1, 1])
-    ax4.plot(result['grad_norm_history'], 'r-', linewidth=1.5)
-    ax4.set_yscale('log')
-    ax4.set_title("Gradient Norm History", fontsize=12)
-    ax4.set_xlabel('Iteration')
-    ax4.grid(True, alpha=0.3, which='both')
-
-    plt.suptitle(f"Matrix Optimization Results (Final Loss: {final_loss:.2e})", fontsize=16)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    
+    plt.tight_layout()
     plot_path = os.path.join(current_dir, 'optimization_result_matrix.png')
     plt.savefig(plot_path)
     print(f"Plot saved to: {plot_path}")
