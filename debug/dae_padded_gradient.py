@@ -30,7 +30,7 @@ class DAEPaddedGradient:
 
         # Create JAX functions
         self.funcs = self._create_jax_functions(dae_data)
-        self.f_fn, self.g_fn, self.h_fn, self.guard_fn, self.reinit_res_fn, self.reinit_vars, self.dims = self.funcs
+        self.f_fn, self.g_fn, self.h_fn, self.guard_fn, self.reinit_res_fn, self.reinit_vars, self.reinit_event_owner, self.reinit_state_target, self.dims = self.funcs
 
         # Pre-allocate persistent host-side buffers to avoid repeated np.zeros()
         n_x, n_z, n_p = self.dims
@@ -145,31 +145,37 @@ class DAEPaddedGradient:
             else:
                 g_exprs.append(eq)
                 
-        # Compile Guard & Reinit
+        # Compile Guard & Reinit (supports list-valued reinit per event)
         when_clauses = dae_data.get('when', [])
         guard_exprs = []
-        reinit_exprs = [] 
-        reinit_vars = [] 
-        
-        for wc in when_clauses:
+        reinit_exprs = []        # flat list of all reinit expressions
+        reinit_event_owner = []  # reinit_event_owner[k] = event index owning expression k
+        reinit_state_target = [] # reinit_state_target[k] = state index for expression k
+        reinit_vars = []         # kept for legacy (flat list of (type, idx))
+
+        for ev_i, wc in enumerate(when_clauses):
             cond = wc['condition']
             if '<' in cond: lhs, rhs = cond.split('<', 1)
             elif '>' in cond: lhs, rhs = cond.split('>', 1)
             else: lhs, rhs = cond.split('=', 1)
             guard_exprs.append(f"({lhs}) - ({rhs})")
-            
-            reinit_str = wc['reinit']
-            if '=' in reinit_str:
-                lhs, rhs = reinit_str.split('=', 1)
-                raw_expr = f"({lhs}) - ({rhs})"
-                lhs_clean = lhs
-                for i, name in enumerate(state_names):
-                        if re.search(r'\b' + re.escape(name) + r'\b', lhs_clean):
+
+            reinit_raw = wc['reinit']
+            reinit_list = reinit_raw if isinstance(reinit_raw, list) else [reinit_raw]
+
+            for reinit_str in reinit_list:
+                if '=' in reinit_str:
+                    rl, rr = reinit_str.split('=', 1)
+                    raw_expr = f"({rl}) - ({rr})"
+                    for i, name in enumerate(state_names):
+                        if re.search(r'\b' + re.escape(name) + r'\b', rl):
                             reinit_vars.append(('state', i))
+                            reinit_state_target.append(i)
                             break
-            else:
-                raw_expr = reinit_str 
-            reinit_exprs.append(raw_expr)
+                else:
+                    raw_expr = reinit_str
+                reinit_exprs.append(raw_expr)
+                reinit_event_owner.append(ev_i)
         
         h_exprs = dae_data.get('h', [])
         use_default_h = (len(h_exprs) == 0)
@@ -218,7 +224,7 @@ class DAEPaddedGradient:
         reinit_res_fn = compile_to_jax(reinit_exprs, True)
         h_fn = lambda t, x, z, p: x if use_default_h else compile_to_jax(h_exprs, False)(t, x, z, p)
 
-        return f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, tuple(reinit_vars), (len(state_names), len(alg_names), len(param_names))
+        return f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, tuple(reinit_vars), tuple(reinit_event_owner), tuple(reinit_state_target), (len(state_names), len(alg_names), len(param_names))
 
     @staticmethod
     def _downsample_segment(t_seg, y_seg, max_pts):
@@ -291,9 +297,9 @@ class DAEPaddedGradient:
                 if curr_blk >= self.max_blocks:
                     raise ValueError(f"Exceeded max_blocks ({self.max_blocks}) during event")
 
-                ev_t = event_infos[i]
+                ev_t, ev_idx = event_infos[i]
                 block_types[curr_blk] = 2 # Event
-                block_indices[curr_blk] = [0, 1]
+                block_indices[curr_blk] = [ev_idx, 1]
                 block_param[curr_blk] = ev_t
                 TS_padded[curr_blk, 0] = 0.0  # not used for events
                 curr_blk += 1
@@ -332,24 +338,26 @@ class DAEPaddedGradient:
 
     @staticmethod
     @partial(jax.jit, static_argnames=['funcs', 'dims'])
-    def _solve_event_system_affine_jit(t_event, w_prev_end, w_post_start, adjoint_state, dL_t, mesh_sens_prev, funcs, dims, p_opt):
+    def _solve_event_system_affine_jit(t_event, w_prev_end, w_post_start, adjoint_state, dL_t, mesh_sens_prev, funcs, dims, p_opt, event_idx):
         """Computes Affine coefficients for Event Multipliers."""
-        f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, reinit_vars, _ = funcs
+        f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, reinit_vars, reinit_event_owner, reinit_state_target, _ = funcs
         n_x, n_z, n_p = dims
+        reinit_var_idx_arr = jnp.array(reinit_var_indices, dtype=jnp.int32)
 
         def event_res_fn(t, xp, xpr, p):
             x_p, z_p = xp[:n_x], xp[n_x:]
             x_r, z_r = xpr[:n_x], xpr[n_x:]
-            r_g = guard_fn(t, x_r, z_r, p)[0:1]
-            r_r = reinit_res_fn(t, x_p, z_p, x_r, z_r, p)
-            r_c = []
-            for k in range(n_x):
-                is_r = False
-                for (type_, idx_) in reinit_vars:
-                        if type_=='state' and idx_==k: is_r=True
-                if not is_r: r_c.append(x_p[k:k+1] - x_r[k:k+1])
+            # Guard for the specific event that fired
+            r_g = jax.lax.dynamic_slice(guard_fn(t, x_r, z_r, p), (event_idx,), (1,))
+            # Reinit residual for this specific event
+            r_reinit_val = reinit_res_fn(t, x_p, z_p, x_r, z_r, p)[event_idx]
+            # Continuity for all states, with the reinitialized state replaced
+            continuity = x_p[:n_x] - x_r[:n_x]
+            reinit_state = reinit_var_idx_arr[event_idx]
+            mask = jnp.arange(n_x) == reinit_state
+            state_res = jnp.where(mask, r_reinit_val, continuity)
             r_a = g_fn(t, x_p, z_p, p) if n_z > 0 else jnp.array([])
-            return jnp.concatenate([r_g, r_r] + r_c + [r_a])
+            return jnp.concatenate([r_g, state_res, r_a])
 
         # Combined Jacobian computation (Single linearization)
         # Using jacrev allows efficient computation wrt multiple args in n_res passes
@@ -548,7 +556,7 @@ class DAEPaddedGradient:
         funcs, dims, max_blocks,
         dL_db_param=None
     ):
-        f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, reinit_vars, dims = funcs
+        f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, reinit_vars, reinit_event_owner, reinit_state_target, dims = funcs
         n_x, n_z, n_p = dims
 
         init_adjoint = jnp.zeros(n_x + n_z)
@@ -630,8 +638,9 @@ class DAEPaddedGradient:
                  else:
                      dL_t = dL_block[0, 0]
 
+                 ev_idx = block_indices[block_idx, 0]
                  tuple_res = DAEPaddedGradient._solve_event_system_affine_jit(
-                     t_event, w_prev_end, w_post_start, curr_adj, dL_t, curr_mesh, funcs, dims, p_opt
+                     t_event, w_prev_end, w_post_start, curr_adj, dL_t, curr_mesh, funcs, dims, p_opt, ev_idx
                  )
                  lp_mu0, lp_v, rhs, slope, gp_mu0, gp_v, mu_0, v_null = tuple_res
                  new_pending = (1.0, mu_0, v_null, lp_mu0, lp_v, rhs, slope, gp_mu0, gp_v)
@@ -764,7 +773,7 @@ class DAEPaddedGradient:
         Returns (J_wn, J_wc, J_p, dR_dtc, dR_dtn) — same cost as computing
         J_wn alone since jacrev reuses the same n_w reverse passes.
         """
-        f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, reinit_vars, dims = funcs
+        f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, reinit_vars, reinit_event_owner, reinit_state_target, dims = funcs
         n_x, n_z, n_p = dims
 
         def step_res(wc, wn, tc, tn, p_var):
@@ -951,7 +960,7 @@ class DAEPaddedGradient:
         
         ts_all = [np.asarray(s.t) for s in sol.segments]
         ys_all = [np.concatenate([s.x, s.z], axis=1) for s in sol.segments]
-        event_infos = [e.t_event for e in sol.events]
+        event_infos = [(e.t_event, e.event_idx) for e in sol.events]
 
         if self.downsample_segments:
              for i in range(len(ts_all)):
@@ -1027,7 +1036,7 @@ class DAEPaddedGradient:
         # This MUST be done every iteration as solution changes structure/values
         ts_all = [np.asarray(s.t) for s in sol.segments]
         ys_all = [np.concatenate([s.x, s.z], axis=1) for s in sol.segments]
-        event_infos = [e.t_event for e in sol.events]
+        event_infos = [(e.t_event, e.event_idx) for e in sol.events]
 
         # Optional downsampling: reduce segments exceeding max_pts or if all_segments is True
         if self.downsample_segments:
@@ -1088,7 +1097,7 @@ class DAEPaddedGradient:
         # 1. Pad problem data (Sol -> Padded Arrays)
         ts_all = [np.asarray(s.t) for s in sol.segments]
         ys_all = [np.concatenate([s.x, s.z], axis=1) for s in sol.segments]
-        event_infos = [e.t_event for e in sol.events]
+        event_infos = [(e.t_event, e.event_idx) for e in sol.events]
 
         # Optional downsampling
         if self.downsample_segments:
@@ -1135,7 +1144,7 @@ class DAEPaddedGradient:
         # 1. Extract and Pad Data
         ts_all = [np.asarray(s.t) for s in sol.segments]
         ys_all = [np.concatenate([s.x, s.z], axis=1) for s in sol.segments]
-        event_infos = [e.t_event for e in sol.events]
+        event_infos = [(e.t_event, e.event_idx) for e in sol.events]
 
         # Optional downsampling: reduce segments exceeding max_pts
         if self.downsample_segments:
@@ -1253,8 +1262,9 @@ class DAEPaddedGradient:
 
             # --- Forward simulation ---
             solver.update_parameters(np.asarray(p_current))
+            max_segs = (self.max_blocks + 1) // 2
             try:
-                sol = solver.solve_augmented(t_span, ncp=ncp)
+                sol = solver.solve_augmented(t_span, ncp=ncp, max_segments=max_segs)
             except Exception as e:
                 print(f"  Iter {it}: solver failed — {e}")
                 break

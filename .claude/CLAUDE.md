@@ -20,3 +20,6 @@ Operating Instructions (must follow):
 5) Documentation updates
 - Do not generate documentation updates  unless the user explicitly asks for an update.
 
+6) Thinking process
+- Do all thinking and reasoning remotely. Do not send your thinking process to my session/terminal. Do all you can to minimize moving tokens 
+back and forth.

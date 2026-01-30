@@ -78,9 +78,17 @@ def compute_padded_loss_and_grad(grad_padded, sol, p_val, target_times, target_d
     )
 
     # loss value: pad data and call _loss_fn_padded directly
-    ts_all = [s.t for s in sol.segments]
-    ys_all = [jnp.concatenate([s.x, s.z], axis=1) for s in sol.segments]
+    ts_all = [np.asarray(s.t) for s in sol.segments]
+    ys_all = [np.concatenate([s.x, s.z], axis=1) for s in sol.segments]
     event_infos = [e.t_event for e in sol.events]
+
+    if grad_padded.downsample_segments:
+        for i in range(len(ts_all)):
+            should_downsample = grad_padded.all_segments or (ts_all[i].shape[0] > grad_padded.max_pts)
+            if should_downsample:
+                ts_all[i], ys_all[i] = grad_padded._downsample_segment(
+                    ts_all[i], ys_all[i], grad_padded.max_pts
+                )
 
     W_p, TS_p, b_types, b_indices, b_param, _ = grad_padded._pad_problem_data(
         ts_all, ys_all, event_infos
@@ -209,6 +217,8 @@ def run_test():
     max_blocks = opt_cfg['max_blocks']
     max_pts = opt_cfg['max_points_per_segment']
     max_targets = opt_cfg['max_targets']
+    downsample_segments = opt_cfg.get('downsample_segments', False)
+    all_segments = opt_cfg.get('all_segments', False)
 
     param_names = [p['name'] for p in dae_data['parameters']]
     true_p = [p['value'] for p in dae_data['parameters']]
@@ -226,9 +236,14 @@ def run_test():
 
     # Build gradient computers
     grad_padded = DAEPaddedGradient(
-        dae_data, max_blocks=max_blocks, max_pts=max_pts, max_targets=max_targets
+        dae_data, max_blocks=max_blocks, max_pts=max_pts, max_targets=max_targets,
+        downsample_segments=downsample_segments,
+        all_segments=all_segments
     )
-    grad_matrix = DAEMatrixGradient(dae_data)
+    grad_matrix = DAEMatrixGradient(
+        dae_data, max_pts=max_pts, downsample_segments=downsample_segments,
+        all_segments=all_segments
+    )
 
     # --- Test 1: Small bias ---
     bias1 = {'g': -1.0, 'e': 0.05}

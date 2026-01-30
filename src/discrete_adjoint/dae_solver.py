@@ -249,36 +249,35 @@ class DAESolver:
         for i, when_clause in enumerate(self.when_clauses):
             condition = when_clause['condition']
             reinit = when_clause['reinit']
-            
-            # Parse condition to create zero-crossing function
-            # Example: "h<0" becomes zc = h - 0
-            # We want zc < 0 when condition is true
+
             zc_expr = self._parse_condition_to_zc(condition)
             self.zc_funcs.append(zc_expr)
-            
-            # Parse reinit expression
-            # Example: "v = -e*prev(v)"
-            reinit_expr, var_name = self._parse_reinit(reinit)
-            self.event_reinit_exprs.append(reinit_expr)
-            self.event_reinit_var_names.append(var_name)
-            
-            # Find variable index (check states first, then algebraic)
-            if var_name in self.state_names:
-                var_idx = self.state_names.index(var_name)
-                var_type = 'state'
-            elif var_name in self.alg_names:
-                var_idx = self.alg_names.index(var_name)
-                var_type = 'alg'
-            else:
-                raise ValueError(f"Reinit variable '{var_name}' not found in states or algebraic variables")
-            
-            self.event_reinit_vars.append((var_type, var_idx))
-            
+
+            # Normalize reinit to list (support both string and list of strings)
+            reinit_list = reinit if isinstance(reinit, list) else [reinit]
+
+            exprs_i, names_i, vars_i = [], [], []
+            for reinit_str in reinit_list:
+                reinit_expr, var_name = self._parse_reinit(reinit_str)
+                exprs_i.append(reinit_expr)
+                names_i.append(var_name)
+
+                if var_name in self.state_names:
+                    vars_i.append(('state', self.state_names.index(var_name)))
+                elif var_name in self.alg_names:
+                    vars_i.append(('alg', self.alg_names.index(var_name)))
+                else:
+                    raise ValueError(f"Reinit variable '{var_name}' not found in states or algebraic variables")
+
+            self.event_reinit_exprs.append(exprs_i)
+            self.event_reinit_var_names.append(names_i)
+            self.event_reinit_vars.append(vars_i)
+
             if self.verbose:
-                print(f"  Event {i}: when {condition} then reinit {var_name}")
+                print(f"  Event {i}: when {condition} then reinit {names_i}")
                 print(f"    Zero-crossing: zc = {zc_expr}")
-                print(f"    Reinit expr: {reinit_expr}")
-                print(f"    Target: {var_type}[{var_idx}] ({var_name})")
+                for expr, vn, (vt, vi) in zip(exprs_i, names_i, vars_i):
+                    print(f"    Reinit: {expr} -> {vt}[{vi}] ({vn})")
         
         if self.verbose:
             print("Event clauses compiled successfully!")
@@ -543,93 +542,59 @@ class DAESolver:
             (x_new, z_new): Updated state and algebraic variables
         """
         from scipy.optimize import fsolve
-        
-        # Copy current state
+        import re
+
         x_new = x.copy()
         z_new = z.copy()
-        
-        # Get reinitialization equation and variable info
-        reinit_equation = self.event_reinit_exprs[event_idx]
-        var_type, var_idx = self.event_reinit_vars[event_idx]
-        var_name = self.event_reinit_var_names[event_idx]
-        
-        # -----------------------------------------------------------
-        # FIX 1: Create base namespace ONCE using x_pre/z_pre
-        # This ensures parallel execution semantics for simultaneous events
-        # -----------------------------------------------------------
+
+        # Lists of reinit equations / variables for this event
+        reinit_equations = self.event_reinit_exprs[event_idx]
+        reinit_var_list = self.event_reinit_vars[event_idx]
+        reinit_name_list = self.event_reinit_var_names[event_idx]
+
+        # Build base namespace ONCE from pre-event state
         base_ns = self._create_eval_namespace(t, x_pre, z_pre)
-        
-        # Add prev values DIRECTLY into namespace with "prev_" prefix
         for i, name in enumerate(self.state_names):
             base_ns[f'prev_{name}'] = x_pre[i]
         for i, name in enumerate(self.alg_names):
             base_ns[f'prev_{name}'] = z_pre[i]
-        
-        # Add prev() as a function too (for explicit calls)
-        def prev(var_name):
-            if var_name in self.state_names:
-                idx = self.state_names.index(var_name)
-                return x_pre[idx]
-            elif var_name in self.alg_names:
-                idx = self.alg_names.index(var_name)
-                return z_pre[idx]
-            else:
-                raise ValueError(f"Unknown variable in prev(): {var_name}")
-        
+
+        def prev(vn):
+            if vn in self.state_names:
+                return x_pre[self.state_names.index(vn)]
+            elif vn in self.alg_names:
+                return z_pre[self.alg_names.index(vn)]
+            raise ValueError(f"Unknown variable in prev(): {vn}")
         base_ns['prev'] = prev
-        
-        # -----------------------------------------------------------
-        # FIX 2: Improved regex with whitespace handling  
-        # -----------------------------------------------------------
-        import re
-        reinit_equation_modified = reinit_equation
-        # Allow optional whitespace: prev( var ) or prev(var)
+
         prev_pattern = r'prev\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)'
-        reinit_equation_modified = re.sub(prev_pattern, r'prev_\1', reinit_equation_modified)
-        
-        # -----------------------------------------------------------
-        # FIX 3: Optimized residual using pre-created base namespace
-        # -----------------------------------------------------------
-        def residual(var_value_array):
-            var_value = var_value_array[0]
-            
-            # Shallow copy to avoid polluting base namespace
-            current_ns = base_ns.copy()
-            
-            # Update only the variable being solved for
-            current_ns[var_name] = var_value
-            
+
+        # Solve each reinit equation independently
+        for reinit_eq, (var_type, var_idx), var_name in zip(
+                reinit_equations, reinit_var_list, reinit_name_list):
+            eq_mod = re.sub(prev_pattern, r'prev_\1', reinit_eq)
+
+            def residual(var_value_array, _eq=eq_mod, _vn=var_name):
+                current_ns = base_ns.copy()
+                current_ns[_vn] = var_value_array[0]
+                try:
+                    return [eval(_eq, current_ns)]
+                except Exception as e:
+                    print(f"Error evaluating reinit for event {event_idx}: {_eq}")
+                    raise
+
+            initial_guess = x_pre[var_idx] if var_type == 'state' else z_pre[var_idx]
             try:
-                res = eval(reinit_equation_modified, current_ns)
-                return [res]
+                new_value = fsolve(residual, [initial_guess], full_output=False)[0]
             except Exception as e:
-                print(f"Error evaluating reinit equation for event {event_idx}: {reinit_equation_modified}")
-                print(f"Namespace keys: {list(current_ns.keys())}")
-                print(f"Error: {e}")
+                print(f"Error solving reinit for event {event_idx}: {reinit_eq}")
                 raise
 
-        
-        # Get initial guess (use pre-event value)
-        if var_type == 'state':
-            initial_guess = x_pre[var_idx]
-        else:
-            initial_guess = z_pre[var_idx]
-        
-        # Solve the equation
-        try:
-            solution = fsolve(residual, [initial_guess], full_output=False)
-            new_value = solution[0]
-        except Exception as e:
-            print(f"Error solving reinit equation for event {event_idx}: {reinit_equation}")
-            print(f"Error: {e}")
-            raise
-        
-        # Apply reinitialization
-        if var_type == 'state':
-            x_new[var_idx] = new_value
-        else:  # 'alg'
-            z_new[var_idx] = new_value
-        
+            if var_type == 'state':
+                x_new[var_idx] = new_value
+            else:
+                z_new[var_idx] = new_value
+
         return x_new, z_new
 
 
@@ -1597,17 +1562,15 @@ class DAESolver:
                         )
                         
                         # Track what changed (compare against frozen pre-state)
-                        var_name = self.event_reinit_var_names[i]
-                        var_type, var_idx = self.event_reinit_vars[i]
-                        old_val = x_frozen_pre[var_idx] if var_type == 'state' else z_frozen_pre[var_idx]
-                        new_val = x_new[var_idx] if var_type == 'state' else z_new[var_idx]
-                        
                         event_times.append(t_curr)
                         event_indices.append(i)
-                        event_vars_changed.append((var_name, old_val, new_val))
-                        
-                        if verbose:
-                            print(f"      Reinitialized {var_name}: {old_val:.6e} -> {new_val:.6e}")
+                        for var_name, (var_type, var_idx) in zip(
+                                self.event_reinit_var_names[i], self.event_reinit_vars[i]):
+                            old_val = x_frozen_pre[var_idx] if var_type == 'state' else z_frozen_pre[var_idx]
+                            new_val = x_new[var_idx] if var_type == 'state' else z_new[var_idx]
+                            event_vars_changed.append((var_name, old_val, new_val))
+                            if verbose:
+                                print(f"      Reinitialized {var_name}: {old_val:.6e} -> {new_val:.6e}")
                         
                         # Update current state (cumulative updates for simultaneous events)
                         x_curr = x_new

@@ -182,6 +182,9 @@ def run_test():
     max_blocks = opt_cfg['max_blocks']
     max_pts = opt_cfg['max_points_per_segment']
     max_targets = opt_cfg['max_targets']
+    max_targets = opt_cfg['max_targets']
+    downsample_segments = opt_cfg.get('downsample_segments', False)
+    all_segments = opt_cfg.get('all_segments', False)
 
     param_names = [p['name'] for p in dae_data['parameters']]
     true_p = [p['value'] for p in dae_data['parameters']]
@@ -196,9 +199,14 @@ def run_test():
     print(f"Target points: {len(target_times)}")
 
     grad_padded = DAEPaddedGradient(
-        dae_data, max_blocks=max_blocks, max_pts=max_pts, max_targets=max_targets
+        dae_data, max_blocks=max_blocks, max_pts=max_pts, max_targets=max_targets,
+        downsample_segments=downsample_segments,
+        all_segments=all_segments
     )
-    grad_matrix = DAEMatrixGradient(dae_data)
+    grad_matrix = DAEMatrixGradient(
+        dae_data, max_pts=max_pts, downsample_segments=downsample_segments,
+        all_segments=all_segments
+    )
 
     # --- Test 1: bias g-2.0, e-0.15 (matches user test files) ---
     p1 = list(true_p)

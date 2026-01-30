@@ -211,7 +211,7 @@ def test_gradient_sweep():
         # METHOD C: Padded JIT Solver (Unified)
         # print("  Computing Padded Adjoint (Unified JIT)...")
         t0 = time.perf_counter()
-        grad_C = padded_gradient_computer.compute_total_gradient(
+        loss_val, grad_C = padded_gradient_computer.compute_total_gradient(
              sol, p_opt, target_times, target_data, blend_sharpness=150.0
         )
         grad_C.block_until_ready()
