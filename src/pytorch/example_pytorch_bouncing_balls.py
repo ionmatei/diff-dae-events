@@ -115,8 +115,8 @@ class DAEOptimizerPyTorchMultiEvent:
         """
         Compute loss by simulating and interpolating (like single ball example).
         """
-        # Simulate with events
-        times, trajectory = self.model.simulate_fixed_grid(t_end, n_points=500)
+        # Simulate with events (n_points total across all segments)
+        times, trajectory = self.model.simulate_fixed_grid(t_end, n_points=self.model.ncp)
 
         # Interpolate predictions to target times (for all 12 states)
         n_states = 12

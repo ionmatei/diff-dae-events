@@ -229,11 +229,9 @@ class BouncingBallsModel(nn.Module):
         """
         Simulate with events using adjoint method (differentiable).
 
-        Similar to single ball example, uses odeint_event with adjoint.
-
         Args:
             t_end: End time
-            n_points: Approximate number of points (actual depends on events)
+            n_points: Total number of simulation points to distribute across all segments
 
         Returns:
             times: tensor of time points
@@ -250,15 +248,40 @@ class BouncingBallsModel(nn.Module):
         current_t = t0
         current_state = state
 
+        # Calculate points per segment based on segment duration
+        t0_val = t0.detach().item() if hasattr(t0, 'detach') else float(t0)
+
+        # Collect segment durations
+        segment_times = []
+        current_t_val = t0_val
+        for event_t in event_times:
+            event_t_val = event_t.detach().item() if hasattr(event_t, 'detach') else float(event_t)
+            segment_times.append((current_t_val, event_t_val))
+            current_t_val = event_t_val
+        # Add final segment
+        if current_t_val < t_end:
+            segment_times.append((current_t_val, t_end))
+
+        # Distribute points proportionally to segment durations
+        total_duration = t_end - t0_val
+        points_per_segment = []
+        for t_start, t_stop in segment_times:
+            duration = t_stop - t_start
+            n_seg = max(2, int(n_points * duration / total_duration))
+            points_per_segment.append(n_seg)
+
+        # Simulate each segment
+        current_t = t0
+        current_state = state
+        seg_idx = 0
+
         for event_t, event_idx in zip(event_times, event_indices):
             # Integrate to event
             current_t_val = current_t.detach().item() if hasattr(current_t, 'detach') else float(current_t)
             event_t_val = event_t.detach().item() if hasattr(event_t, 'detach') else float(event_t)
 
-            tt = torch.linspace(
-                current_t_val, event_t_val,
-                max(2, int((event_t_val - current_t_val) * self.ncp))
-            )[1:-1]
+            n_seg = points_per_segment[seg_idx]
+            tt = torch.linspace(current_t_val, event_t_val, n_seg)[1:-1]
             tt = torch.cat([current_t.reshape(-1), tt, event_t.reshape(-1)])
 
             if len(tt) > 1:
@@ -269,11 +292,13 @@ class BouncingBallsModel(nn.Module):
             # Apply state update
             current_state = self.state_update(sol[-1] if len(tt) > 1 else current_state, event_idx)
             current_t = event_t
+            seg_idx += 1
 
         # Final segment if needed
-        current_t_val = current_t.detach().item() if hasattr(current_t, 'detach') else float(current_t)
-        if current_t_val < t_end:
-            tt = torch.linspace(current_t_val, t_end, self.ncp)
+        if seg_idx < len(points_per_segment):
+            current_t_val = current_t.detach().item() if hasattr(current_t, 'detach') else float(current_t)
+            n_seg = points_per_segment[seg_idx]
+            tt = torch.linspace(current_t_val, t_end, n_seg)
             if len(tt) > 1:
                 sol = self.odeint(self, current_state, tt, atol=1e-8, rtol=1e-8)
                 all_times.append(tt[1:])
