@@ -2,8 +2,8 @@ dae_solver:
   atol: 1.0e-8
   rtol: 1.0e-8
   start_time: 0.0
-  stop_time: 1.0
-  ncp: 1000
+  stop_time: 2.00
+  ncp: 600
   dae_specification_file: dae_examples/dae_specification_bouncing_balls.json
   
 optimizer:
@@ -23,14 +23,13 @@ optimizer:
   opt_params:
     - e_g
     - e_b
-  learning_rate: 0.01
-  max_iterations: 600
+  max_iterations: 300
   tol: 1.0e-8
-  print_every: 10
-  max_blocks: 50
-  max_targets: 1200 # 1.2 * ncp
+  print_every: 1
+  max_blocks: 20
+  max_targets: 700 # 1.2 * ncp
   downsample_segments: true
-  all_segments: true
+  all_segments: false
   device: cpu
   gpu_memory_fraction: 0.9
 

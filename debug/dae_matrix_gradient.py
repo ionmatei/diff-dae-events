@@ -58,28 +58,32 @@ class DAEMatrixGradient:
         # Compile Guard & Reinit
         when_clauses = dae_data.get('when', [])
         guard_exprs = []
-        reinit_exprs = [] 
-        reinit_vars = [] 
-        
+        reinit_exprs = []
+        reinit_vars = []
+
         for wc in when_clauses:
             cond = wc['condition']
             if '<' in cond: lhs, rhs = cond.split('<', 1)
             elif '>' in cond: lhs, rhs = cond.split('>', 1)
             else: lhs, rhs = cond.split('=', 1)
             guard_exprs.append(f"({lhs}) - ({rhs})")
-            
-            reinit_str = wc['reinit']
-            if '=' in reinit_str:
-                lhs, rhs = reinit_str.split('=', 1)
-                raw_expr = f"({lhs}) - ({rhs})"
-                lhs_clean = lhs
-                for i, name in enumerate(state_names):
-                        if re.search(r'\b' + re.escape(name) + r'\b', lhs_clean):
-                            reinit_vars.append(('state', i))
-                            break
-            else:
-                raw_expr = reinit_str 
-            reinit_exprs.append(raw_expr)
+
+            # Handle list-valued reinit
+            reinit = wc['reinit']
+            reinit_list = reinit if isinstance(reinit, list) else [reinit]
+
+            for reinit_str in reinit_list:
+                if '=' in reinit_str:
+                    lhs, rhs = reinit_str.split('=', 1)
+                    raw_expr = f"({lhs}) - ({rhs})"
+                    lhs_clean = lhs
+                    for i, name in enumerate(state_names):
+                            if re.search(r'\b' + re.escape(name) + r'\b', lhs_clean):
+                                reinit_vars.append(('state', i))
+                                break
+                else:
+                    raw_expr = reinit_str
+                reinit_exprs.append(raw_expr)
         
         h_exprs = dae_data.get('h', [])
         use_default_h = (len(h_exprs) == 0)

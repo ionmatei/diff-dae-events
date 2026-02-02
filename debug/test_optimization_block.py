@@ -85,6 +85,7 @@ def run_optimization_test():
     max_pts = opt_cfg['max_points_per_segment']
     max_targets = opt_cfg['max_targets']
     downsample_segments = opt_cfg.get('downsample_segments', False)
+    all_segments = opt_cfg.get('all_segments', False)
 
     # Resolve optimized parameter indices
     param_names = [p['name'] for p in dae_data['parameters']]
@@ -125,7 +126,7 @@ def run_optimization_test():
     # --- 4. Build gradient computer and run optimizer ---
     grad_computer = DAEPaddedGradient(
         dae_data, max_blocks=max_blocks, max_pts=max_pts, max_targets=max_targets,
-        downsample_segments=downsample_segments
+        downsample_segments=downsample_segments, all_segments=all_segments
     )
 
     result = grad_computer.optimize_adam(

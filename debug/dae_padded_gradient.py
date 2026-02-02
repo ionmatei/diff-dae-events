@@ -342,20 +342,26 @@ class DAEPaddedGradient:
         """Computes Affine coefficients for Event Multipliers."""
         f_fn, g_fn, h_fn, guard_fn, reinit_res_fn, reinit_vars, reinit_event_owner, reinit_state_target, _ = funcs
         n_x, n_z, n_p = dims
-        reinit_var_idx_arr = jnp.array(reinit_var_indices, dtype=jnp.int32)
+        reinit_event_owner_arr = jnp.array(reinit_event_owner, dtype=jnp.int32)
+        reinit_state_target_arr = jnp.array(reinit_state_target, dtype=jnp.int32)
+        n_total_reinits = len(reinit_event_owner)
 
         def event_res_fn(t, xp, xpr, p):
             x_p, z_p = xp[:n_x], xp[n_x:]
             x_r, z_r = xpr[:n_x], xpr[n_x:]
             # Guard for the specific event that fired
             r_g = jax.lax.dynamic_slice(guard_fn(t, x_r, z_r, p), (event_idx,), (1,))
-            # Reinit residual for this specific event
-            r_reinit_val = reinit_res_fn(t, x_p, z_p, x_r, z_r, p)[event_idx]
-            # Continuity for all states, with the reinitialized state replaced
+            # All reinit residuals
+            all_reinits = reinit_res_fn(t, x_p, z_p, x_r, z_r, p)
+            # Start with continuity for all states
             continuity = x_p[:n_x] - x_r[:n_x]
-            reinit_state = reinit_var_idx_arr[event_idx]
-            mask = jnp.arange(n_x) == reinit_state
-            state_res = jnp.where(mask, r_reinit_val, continuity)
+            state_res = continuity
+            # Scatter each reinit to its state position (compile-time unrolled)
+            for k in range(n_total_reinits):
+                is_mine = (event_idx == reinit_event_owner_arr[k])
+                st = reinit_state_target_arr[k]
+                mask = jnp.arange(n_x) == st
+                state_res = jnp.where(is_mine & mask, all_reinits[k], state_res)
             r_a = g_fn(t, x_p, z_p, p) if n_z > 0 else jnp.array([])
             return jnp.concatenate([r_g, state_res, r_a])
 
@@ -1298,10 +1304,11 @@ class DAEPaddedGradient:
             p_current = p_current.at[jnp.array(opt_param_indices)].add(-step)
 
             elapsed = (time.perf_counter() - t0) * 1000.0
+            n_segments = len(sol.segments)
 
             if it % print_every == 0 or it == 1:
                 print(f"  Iter {it:4d} | loss={loss_val:.6e} | |grad|={grad_norm:.6e} | "
-                      f"p={np.asarray(p_current[jnp.array(opt_param_indices)])} | {elapsed:.1f} ms")
+                      f"p={np.asarray(p_current[jnp.array(opt_param_indices)])} | {elapsed:.1f} ms | segs={n_segments}")
 
             # --- Convergence check ---
             if grad_norm < tol:
