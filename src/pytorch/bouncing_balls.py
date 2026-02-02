@@ -302,13 +302,16 @@ class BouncingBallsModel(nn.Module):
             event_t_val = event_t.detach().item()
 
             # Find target times in this segment (before event)
+            current_t_val = current_t.detach().item()
             segment_targets = []
             while target_idx < len(target_times) and target_times[target_idx].item() <= event_t_val:
-                segment_targets.append(target_times[target_idx])
+                t_val = target_times[target_idx].item()
+                # Only include if strictly after current time
+                if t_val > current_t_val + 1e-10:
+                    segment_targets.append(target_times[target_idx])
                 target_idx += 1
 
             if segment_targets:
-                current_t_val = current_t.detach().item()
                 tt = torch.cat([torch.tensor([current_t_val], dtype=torch.float64), torch.stack(segment_targets)])
                 sol = self.odeint(self, current_state, tt, atol=1e-8, rtol=1e-8)
                 all_states.append(sol[1:].reshape(-1, 12))
@@ -322,11 +325,14 @@ class BouncingBallsModel(nn.Module):
 
         # Remaining target times after last event
         if target_idx < len(target_times):
-            segment_targets = target_times[target_idx:]
             current_t_val = current_t.detach().item()
-            tt = torch.cat([torch.tensor([current_t_val], dtype=torch.float64), segment_targets])
-            sol = self.odeint(self, current_state, tt, atol=1e-8, rtol=1e-8)
-            all_states.append(sol[1:].reshape(-1, 12))
+            # Filter out any targets too close to current time
+            segment_targets = [t for t in target_times[target_idx:] if t.item() > current_t_val + 1e-10]
+
+            if segment_targets:
+                tt = torch.cat([torch.tensor([current_t_val], dtype=torch.float64), torch.stack(segment_targets)])
+                sol = self.odeint(self, current_state, tt, atol=1e-8, rtol=1e-8)
+                all_states.append(sol[1:].reshape(-1, 12))
 
         return torch.cat(all_states, dim=0) if all_states else torch.zeros(0, 12, dtype=torch.float64)
 

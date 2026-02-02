@@ -108,21 +108,24 @@ class DAEOptimizerPyTorchMultiEvent:
 
     def _compute_loss(
         self,
+        t_end: float,
         target_times: torch.Tensor,
         target_data: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute loss by simulating directly at target times.
-
-        Args:
-            target_times: (N,) tensor of target times
-            target_data: (N, 12) tensor of target states
-
-        Returns:
-            Scalar loss (MSE)
+        Compute loss by simulating and interpolating (like single ball example).
         """
-        # Simulate directly at target times (no interpolation needed)
-        y_pred = self.model.simulate_at_times(target_times)
+        # Simulate with events
+        times, trajectory = self.model.simulate_fixed_grid(t_end, n_points=500)
+
+        # Interpolate predictions to target times (for all 12 states)
+        n_states = 12
+        y_pred = torch.zeros(len(target_times), n_states, dtype=torch.float64)
+
+        for i in range(n_states):
+            y_pred[:, i] = self._differentiable_interp(
+                times, trajectory[:, i], target_times
+            )
 
         # MSE loss
         loss = torch.mean((y_pred - target_data) ** 2)
@@ -198,7 +201,7 @@ class DAEOptimizerPyTorchMultiEvent:
             optimizer.zero_grad()
 
             # Forward pass
-            loss = self._compute_loss(target_times_t, target_data_t)
+            loss = self._compute_loss(t_end, target_times_t, target_data_t)
 
             # Backward pass
             loss.backward()
