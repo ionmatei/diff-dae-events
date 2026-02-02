@@ -213,16 +213,16 @@ class DAEOptimizerPyTorchMultiEvent:
                     grad_norm += float(torch.sum(param.grad ** 2))
             grad_norm = np.sqrt(grad_norm)
 
-            # Count segments (for diagnostics)
-            with torch.no_grad():
-                _, _, event_times, _ = self.model.simulate(t_end, self.max_events)
-                n_segments = len(event_times) + 1
+            # # Count segments (for diagnostics)
+            # with torch.no_grad():
+            #     _, _, event_times, _ = self.model.simulate(t_end, self.max_events)
+            #     n_segments = len(event_times) + 1
 
             # Record history
             loss_val = float(loss.detach())
             history['loss'].append(loss_val)
             history['gradient_norm'].append(grad_norm)
-            history['n_segments'].append(n_segments)
+            # history['n_segments'].append(n_segments)
 
             p_current = np.concatenate([p.detach().numpy().flatten() for p in self.opt_params])
             history['params'].append(p_current.copy())
@@ -232,7 +232,7 @@ class DAEOptimizerPyTorchMultiEvent:
             if it % print_every == 0 or it == 0:
                 param_str = " ".join([f"{p.item():.4f}" for p in self.opt_params])
                 print(f"  Iter {it:4d} | loss={loss_val:.6e} | |grad|={grad_norm:.6e} | "
-                      f"p=[{param_str}] | {iter_time:.1f} ms | segs={n_segments}")
+                      f"p=[{param_str}] | {iter_time:.1f} ms ")
 
                 # Debug: print individual gradients
                 if it == 0:
@@ -249,16 +249,16 @@ class DAEOptimizerPyTorchMultiEvent:
                 converged = True
                 break
 
-            # Clamp parameters to valid ranges
+            # # Clamp parameters to valid ranges
             with torch.no_grad():
                 # Ensure restitution coefficients are in (0, 1)
                 if hasattr(self.model, 'e_g'):
-                    self.model.e_g.data.clamp_(0.01, 0.99)
+                    self.model.e_g.data.clamp_(0.001, 5.0)
                 if hasattr(self.model, 'e_b'):
-                    self.model.e_b.data.clamp_(0.01, 0.99)
+                    self.model.e_b.data.clamp_(0.001, 5.0)
                 # Ensure g is positive
                 if hasattr(self.model, 'g'):
-                    self.model.g.data.clamp_(0.1, 100.0)
+                    self.model.g.data.clamp_(0.001, 100.0)
 
         elapsed = time.time() - start_time
 
