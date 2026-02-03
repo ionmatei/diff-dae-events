@@ -292,10 +292,18 @@ def run_optimization_test():
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust for suptitle
     plot_path = os.path.join(root_dir, 'results', 'optimization_result_jax_bouncing_ball_block.png')
-    plt.savefig(plot_path)
-    print(f"Plot saved to: {plot_path}")
-    # plt.show()
-
+    # Return benchmark results
+    benchmark_results = {
+        'method': 'jax_block',
+        'ncp': ncp,
+        'avg_iter_time': result.get('avg_iter_time', 0.0),
+        'p_opt': dict(zip(param_names, np.asarray(p_opt))),
+        'p_true': dict(zip(param_names, true_p)),
+        'final_validation_loss': float(val_mse),
+        'iterations': result['n_iter'],
+        'converged': bool(result['converged'])
+    }
+    return benchmark_results
 
 if __name__ == "__main__":
     run_optimization_test()

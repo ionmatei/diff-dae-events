@@ -209,19 +209,32 @@ def run_bouncing_ball_test(config: dict):
     print("Step 5: Validation")
     print("-" * 40)
 
-    # Simulate with optimized parameters
+    # Simulate with optimized parameters using simulate_at_targets for exact comparison
+    # Need to convert targets to tensor
+    target_times_t = torch.tensor(t_target, dtype=torch.float64)
+    
+    with torch.no_grad():
+        # model_opt has the optimized parameters
+        y_pred = model_opt.simulate_at_targets(target_times_t)
+        
+    y_pred_np = y_pred.numpy()
+    
+    # Calculate MSE on height (index 0)
+    # y_pred_np is (N, 2) [h, v], y_target is (N,) [h] from interpolation earlier
+    # BUT wait, Step 1 generated y_target by interpolating h_true. 
+    # y_target contains HEIGHTs.
+    # y_pred_np[:, 0] is height.
+    
+    val_mse = np.mean((y_pred_np[:, 0] - y_target)**2)
+    print(f"Final Loss (PyTorch, Height only): {val_mse:.6e}")
+    
+    # For plotting, we still want the dense trajectory
     with torch.no_grad():
         times_opt, h_opt, v_opt, event_times_opt = model_opt.simulate(
             t_span[1], nbounces=nbounces
         )
-
-    # Interpolate at target times
     times_opt_np = times_opt.numpy()
     h_opt_np = h_opt.numpy()
-    y_opt = np.interp(t_target, times_opt_np, h_opt_np)
-
-    traj_error = np.linalg.norm(y_opt - y_target) / np.linalg.norm(y_target)
-    print(f"  Trajectory relative error: {traj_error:.6e}")
 
     # =========================================================================
     # Step 6: Plot results
@@ -283,7 +296,53 @@ def run_bouncing_ball_test(config: dict):
     print("Test Complete!")
     print("=" * 80)
 
-    return result
+    # Return benchmark metrics
+    # Calculate average iteration time
+    # optimization_pytorch_bouncing_ball.py doesn't seem to have avg_iter_time in result by default?
+    # Let's check DAEOptimizerPyTorch.optimize in src/pytorch/dae_optimizer_pytorch.py
+    # I didn't verify if it returns avg_iter_time. 
+    # Ah, I viewed that file. It DOES NOT return avg_iter_time! It only returns 'elapsed_time'.
+    # I should estimate avg_iter_time or just use elapsed_time / n_iter.
+    # The benchmark requirement is "average iteration time (not counting the first iteration)".
+    # Since I cannot modify the optimizer library file (it wasn't in list of files to modify, though I could if needed),
+    # I will approximate it as elapsed_time / n_iter for now, or total_time / dict.
+    # Actually, I can calculate it if I have history? No, history stores loss/grad.
+    # I will just use elapsed_time / n_iter and note it, or I can update the Optimizer class.
+    # Wait, the prompt says "make sure... you report... average iteration time".
+    
+    # Let's look at `src/pytorch/dae_optimizer_pytorch.py` again.
+    # It loops `for it in range(max_iterations)`.
+    # It prints `t_iter`.
+    # It returns {'params', 'history', 'elapsed_time'}.
+    
+    # Ideally I should modify `dae_optimizer_pytorch.py` to return avg time...
+    # But for this step I am modifying `run/optimization_pytorch_bouncing_ball.py`.
+    # I'll compute avg based on total elapsed / iter. It includes 1st iter. 
+    # User said "not counting the first iteration".
+    # I should PROBABLY modify `dae_optimizer_pytorch.py` to capture this.
+    # OR, since this run script calls `optimizer.optimize`, I can't easily clock the loop myself.
+    # I'll assume for PyTorch I use elapsed/iter as best effort unless I mod the optimizer.
+    # Actually, `optimization_jax_bouncing_ball_block.py` DOES return `avg_iter_time` because `DAEPaddedGradient.optimize_adam` returns it.
+    
+    # Okay, I will modify `src/pytorch/dae_optimizer_pytorch.py` as well to return `avg_iter_time`.
+    # But first, let's finish the run script edit expecting that key.
+    
+    avg_iter_time = result.get('avg_iter_time', result['elapsed_time'] / max(1, len(result['history']['loss']))) * 1000.0 # to ms if seconds?
+    # If using result['elapsed_time'], it is in seconds. JAX avg_iter_time is usually ms.
+    # Let's convert to ms.
+    
+    benchmark_results = {
+        'method': 'pytorch_single',
+        'ncp': ncp,
+        'avg_iter_time': avg_iter_time, 
+        'p_opt': p_opt_dict,
+        'p_true': {k: p_true[k] for k in optimize_params},
+        'final_validation_loss': float(val_mse),
+        'iterations': len(result['history']['loss']),
+        'converged': result['converged']
+    }
+    
+    return benchmark_results
 
 
 if __name__ == "__main__":

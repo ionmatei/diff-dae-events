@@ -37,9 +37,10 @@ def load_config(config_path):
     solver_cfg = cfg['dae_solver']
     opt_cfg = cfg['optimizer']
     dae_spec_path = solver_cfg['dae_specification_file']
+    generate_animation = cfg.get('generate_animation', False)
     with open(dae_spec_path, 'r') as f:
         dae_data = json.load(f)
-    return dae_data, solver_cfg, opt_cfg
+    return dae_data, solver_cfg, opt_cfg, generate_animation
 
 
 def prepare_loss_targets(sol, n_x, t_start, t_end):
@@ -155,7 +156,7 @@ def run_optimization_test():
 
     # --- 1. Load config ---
     config_path = os.path.join(root_dir, 'config/config_bouncing_balls.yaml')
-    dae_data, solver_cfg, opt_cfg = load_config(config_path)
+    dae_data, solver_cfg, opt_cfg, generate_animation = load_config(config_path)
 
     t_start = solver_cfg['start_time']
     t_stop = solver_cfg['stop_time']
@@ -427,13 +428,24 @@ def run_optimization_test():
     x_min, x_max = p_dict['x_min'], p_dict['x_max']
     y_min, y_max = p_dict['y_min'], p_dict['y_max']
 
-    create_animation(
-        sim_t, sim_x, traj_true,
-        x_min, x_max, y_min, y_max,
-        filename=os.path.join(root_dir, 'results', 'animation_jax_balls.mp4')
-    )
-    # plt.show()
-
+    if generate_animation:
+        create_animation(
+            sim_t, sim_x, traj_true,
+            x_min, x_max, y_min, y_max,
+            filename=os.path.join(root_dir, 'results', 'animation_jax_balls.mp4')
+        )
+    # Return benchmark results
+    benchmark_results = {
+        'method': 'jax_multi',
+        'ncp': ncp,
+        'avg_iter_time': result.get('avg_iter_time', 0.0),
+        'p_opt': dict(zip(param_names, np.asarray(p_opt))),
+        'p_true': dict(zip(param_names, true_p)),
+        'final_validation_loss': float(val_mse),
+        'iterations': result['n_iter'],
+        'converged': bool(result['converged'])
+    }
+    return benchmark_results
 
 if __name__ == "__main__":
     run_optimization_test()

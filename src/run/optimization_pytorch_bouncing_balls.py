@@ -555,7 +555,20 @@ def run_bouncing_balls_test(config: dict):
     print("Step 5: Validation")
     print("-" * 40)
 
-    # Simulate with optimized parameters using the same method as optimization
+    # Simulate with optimized parameters using simulate_at_targets
+    target_times_t = torch.tensor(t_target, dtype=torch.float64)
+    with torch.no_grad():
+        y_pred = model_opt.simulate_at_targets(target_times_t)
+        
+    y_pred_np = y_pred.numpy()
+    
+    # Calculate MSE on positions (indices 0, 1, 4, 5, 8, 9)
+    # y_target contains all states (N, 12) per prepare_loss_targets in this file
+    pos_idx = [0, 1, 4, 5, 8, 9]
+    val_mse = np.mean((y_pred_np[:, pos_idx] - y_target[:, pos_idx])**2)
+    print(f"Final Loss (PyTorch, Positions only): {val_mse:.6e}")
+    
+    # Simulate densly for plot
     t_end_val = float(t_target[-1]) + 1e-6
     with torch.no_grad():
         times_opt, traj_opt = model_opt.simulate_fixed_grid(t_end_val, n_points=ncp)
@@ -563,13 +576,10 @@ def run_bouncing_balls_test(config: dict):
     times_opt_np = times_opt.numpy()
     traj_opt_np = traj_opt.numpy()
 
-    # Position-only error (matches the loss used in optimization)
-    pos_idx = [0, 1, 4, 5, 8, 9]
-    y_opt_pos = np.zeros((len(t_target), len(pos_idx)))
+    # Trajectory relative error calculation (keep existing metric too if desired, or skip)
+    # The existing code did interpolation for y_opt_pos. We now have y_pred_np exact.
+    y_opt_pos = y_pred_np[:, pos_idx]
     y_tgt_pos = y_target[:, pos_idx]
-    for i, si in enumerate(pos_idx):
-        y_opt_pos[:, i] = np.interp(t_target, times_opt_np, traj_opt_np[:, si])
-
     traj_error = np.linalg.norm(y_opt_pos - y_tgt_pos) / np.linalg.norm(y_tgt_pos)
     print(f"  Trajectory relative error (positions): {traj_error:.6e}")
 
@@ -675,7 +685,25 @@ def run_bouncing_balls_test(config: dict):
     print("Test Complete!")
     print("=" * 80)
 
-    return result
+    # Return benchmark metrics
+    avg_iter_time = result.get('avg_iter_time', 0.0) 
+    # The optimization_pytorch_bouncing_balls.py uses DAEOptimizerPyTorchMultiEvent locally defined (checking imports...)
+    # Wait, Step 4 view file shows DAEOptimizerPyTorchMultiEvent defined LOCALLY in the file.
+    # Lines 53-282. It computes result['avg_iter_time'] at line 266-267!
+    # "if len(iter_times) > 1: avg_iter_time = sum(iter_times[1:]) ... else 0.0"
+    # So I don't need to manually compute it here. It is already in result.
+    
+    benchmark_results = {
+        'method': 'pytorch_multi',
+        'ncp': ncp,
+        'avg_iter_time': avg_iter_time, 
+        'p_opt': p_opt_subset,
+        'p_true': p_true_subset,
+        'final_validation_loss': float(val_mse),
+        'iterations': result['n_iter'],
+        'converged': result['converged']
+    }
+    return benchmark_results
 
 
 if __name__ == "__main__":
