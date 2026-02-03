@@ -446,7 +446,7 @@ class DAEOptimizerPyTorch:
                 param_str = ", ".join([f"{name}={p.item():.6f}"
                                        for name, p in zip(self.optimize_params, self.opt_params)])
                 print(f"  Iter {it:4d}: Loss = {loss_val:.6e}, |grad| = {grad_norm:.6e}, "
-                      f"t_iter = {1000*iter_time:.3f}ms, {param_str}")
+                      f"t_iter = {1000*iter_time:.2f} ms, {param_str}")
 
             if grad_norm < tol:
                 print(f"\nConverged at iteration {it}")

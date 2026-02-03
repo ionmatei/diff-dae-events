@@ -1,9 +1,0 @@
-debug/test_optimization_block.py
-debug/test_optimization_matrix.py
-
-
-
-
-debug/test_adjoint_comparison.py
-debug/test_loss_gradient_comparison.py
-debug/test_param_gradient_comparison.py
