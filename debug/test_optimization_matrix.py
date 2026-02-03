@@ -72,6 +72,7 @@ def run_optimization_test():
     max_targets = opt_cfg['max_targets']
     downsample_segments = opt_cfg.get('downsample_segments', False)
     all_segments = opt_cfg.get('all_segments', False)
+    sim_top_time = opt_cfg.get('sim_top_time', False)
 
     # Setup
     t_span = (solver_cfg['start_time'], solver_cfg['stop_time'])
@@ -90,6 +91,7 @@ def run_optimization_test():
     param_names = [p['name'] for p in dae_data['parameters']]
     opt_param_names = opt_cfg['opt_params']
     opt_indices = [param_names.index(n) for n in opt_param_names]
+    print(f"Adaptive Horizon (sim_top_time): {sim_top_time}")
     
     p_init = list(true_p)
     # Bias
@@ -119,18 +121,36 @@ def run_optimization_test():
         blend_sharpness=blend_sharpness,
         tol=tol,
         print_every=print_every,
+        adaptive_horizon=sim_top_time,
     )
     
     # Report
     p_opt = result['p_opt']
-    print("\nOptimization Finished")
-    print(f"Final Params: {dict(zip(param_names, np.asarray(p_opt)))}")
+    print("\n" + "=" * 70)
+    print("Optimization Result")
+    print("=" * 70)
+    print(f"True params:      {dict(zip(param_names, true_p))}")
+    print(f"Initial params:   {dict(zip(param_names, np.asarray(p_init)))}")
+    print(f"Optimized params: {dict(zip(param_names, np.asarray(p_opt)))}")
+    print(f"Iterations:       {result['n_iter']}")
+    print(f"Converged:        {result['converged']}")
+    print(f"Final loss:       {result['loss_history'][-1]:.6e}")
+    print(f"Final |grad|:     {result['grad_norm_history'][-1]:.6e}")
+    if 'avg_iter_time' in result:
+        print(f"Avg iter time:    {result['avg_iter_time']:.2f} ms")
+
+    # Per-parameter error
+    for name in opt_param_names:
+        idx = param_names.index(name)
+        err = abs(float(p_opt[idx]) - true_p[idx])
+        print(f"  {name}: true={true_p[idx]:.4f}  opt={float(p_opt[idx]):.4f}  err={err:.6e}")
     
     # Plot
     print("\nGenerating plots...")
     import matplotlib.pyplot as plt
     solver.update_parameters(p_opt)
-    sol_opt = solver.solve_augmented(t_span, ncp=ncp)
+    max_segs = max_blocks // 2
+    sol_opt = solver.solve_augmented(t_span, ncp=ncp, max_segments=max_segs)
     
     # Interpolate using Matrix Gradient computer
     print(f"Interpolating optimized solution at {len(target_times)} target points...")

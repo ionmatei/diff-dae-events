@@ -3,7 +3,7 @@ dae_solver:
   rtol: 1.0e-6
   start_time: 0.0
   stop_time: 2.0
-  ncp: 500
+  ncp: 200
   dae_specification_file: dae_examples/dae_specification_bouncing_ball.json
   
 optimizer:
@@ -20,14 +20,15 @@ optimizer:
   prediction_method: sigmoid  # 'sigmoid', 'linear', or 'hermite'
   max_segments: 3
   max_points_per_segment: 200
+  sim_top_time: true
   opt_params:
     - g
     - e
-  learning_rate: 0.01
-  max_iterations: 600
+
+  max_iterations: 500
   tol: 1.0e-8
   print_every: 10
-  max_blocks: 10
+  max_blocks: 20
   max_targets: 600 # 1.2 * ncp
   downsample_segments: true
   all_segments: true

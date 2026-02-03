@@ -225,9 +225,129 @@ class BouncingBallsModel(nn.Module):
         t0 = torch.tensor([0.0], dtype=torch.float64)
         return t0, self.initial_state.clone()
 
+    def _bisect_event(self, current_state, t_start, t_hi, ev_idx, n_bisect=50):
+        """
+        Bisection fallback when odeint_event fails.
+        Finds the time when event ev_idx crosses zero in [t_start, t_hi].
+
+        Always integrates from t_start with current_state to evaluate the
+        event function at the midpoint.
+
+        Returns:
+            (event_t, state_at_event) as tensors with grad tracking
+        """
+        t_start_val = float(t_start)
+        t_lo_val = t_start_val
+        t_hi_val = float(t_hi)
+
+        for _ in range(n_bisect):
+            t_mid = (t_lo_val + t_hi_val) / 2.0
+            # Always integrate from the original start to t_mid
+            tt = torch.tensor([t_start_val, t_mid], dtype=torch.float64)
+            sol = self.odeint(self, current_state, tt, atol=1e-8, rtol=1e-8)
+            ev_val = self.event_fn(tt[1], sol[-1])[ev_idx]
+
+            if ev_val.item() > 0:
+                t_lo_val = t_mid
+            else:
+                t_hi_val = t_mid
+
+            if (t_hi_val - t_lo_val) < 1e-10:
+                break
+
+        # Final integration to the event time (with grad tracking)
+        event_t = torch.tensor([t_hi_val], dtype=torch.float64)
+        tt_final = torch.tensor([t_start_val, t_hi_val], dtype=torch.float64)
+        sol_final = self.odeint(self, current_state, tt_final, atol=1e-8, rtol=1e-8)
+        return event_t, sol_final[-1]
+
+    def _find_next_event(self, current_state, current_t, t_end):
+        """
+        Find the next event using a probe integration to filter candidates,
+        then odeint_event only on candidates that actually cross zero.
+        Falls back to bisection when odeint_event fails.
+
+        Returns:
+            (event_t, event_idx, state_at_event) or (None, None, None)
+        """
+        current_t_val = current_t.detach().item() if hasattr(current_t, 'detach') else float(current_t)
+        if current_t_val >= t_end:
+            return None, None, None
+
+        # Step 1: Probe integration to find which events cross zero
+        n_probe = 30
+        tt_probe = torch.linspace(current_t_val, t_end, n_probe, dtype=torch.float64)
+        with torch.no_grad():
+            sol_probe = odeint(self, current_state.detach(), tt_probe, atol=1e-6, rtol=1e-6)
+
+        # Evaluate all event functions along probe trajectory
+        # Record the first bracket [t_lo, t_hi] for each candidate
+        candidates = {}  # ev_idx -> (t_lo, t_hi)
+        events_prev = self.event_fn(tt_probe[0], sol_probe[0])
+        for i in range(1, n_probe):
+            events_i = self.event_fn(tt_probe[i], sol_probe[i])
+            for ev_idx in range(15):
+                if ev_idx not in candidates and events_prev[ev_idx] > 0 and events_i[ev_idx] <= 0:
+                    candidates[ev_idx] = (tt_probe[i - 1].item(), tt_probe[i].item())
+            events_prev = events_i
+
+        if not candidates:
+            return None, None, None
+
+        # Step 2: Call odeint_event for each candidate; bisect on failure
+        best_event_t = None
+        best_event_idx = None
+        best_state_at_event = None
+
+        for ev_idx, (t_lo, t_hi) in candidates.items():
+            event_t_val = None
+            state_at_event = None
+
+            # Try odeint_event first
+            try:
+                _ev_idx = ev_idx
+
+                def single_event_fn(t, s, _idx=_ev_idx):
+                    events = self.event_fn(t, s)
+                    return events[_idx]
+
+                event_t, solution = odeint_event(
+                    self,
+                    current_state,
+                    current_t,
+                    event_fn=single_event_fn,
+                    reverse_time=False,
+                    atol=1e-8,
+                    rtol=1e-8,
+                    odeint_interface=self.odeint,
+                )
+                event_t_val = event_t.detach().item()
+                state_at_event = solution[-1]
+            except:
+                # Fallback: bisection using probe bracket
+                try:
+                    event_t, state_at_event = self._bisect_event(
+                        current_state, current_t_val, t_hi, ev_idx
+                    )
+                    event_t_val = event_t.detach().item()
+                except:
+                    continue
+
+            if event_t_val is not None and event_t_val < t_end:
+                best_t_val = best_event_t.detach().item() if best_event_t is not None else None
+                if best_event_t is None or event_t_val < best_t_val:
+                    best_event_t = event_t if isinstance(event_t, torch.Tensor) else torch.tensor([event_t_val], dtype=torch.float64)
+                    best_event_idx = ev_idx
+                    best_state_at_event = state_at_event
+
+        if best_event_t is None:
+            return None, None, None
+
+        return best_event_t, best_event_idx, best_state_at_event
+
     def simulate_fixed_grid(self, t_end: float, n_points: int = 500):
         """
-        Simulate with events using adjoint method (differentiable).
+        Single-pass simulation: detect events and collect dense output together.
 
         Args:
             t_end: End time
@@ -237,48 +357,52 @@ class BouncingBallsModel(nn.Module):
             times: tensor of time points
             trajectory: (N, 12) tensor
         """
-        # Get event times using odeint_event
-        event_times, event_indices = self.get_event_times(t_end, max_events=20)
+        max_events = 20
 
-        # Build dense trajectory
+        # --- Pass 1 (cheap): detect all events ---
         t0, state = self.get_initial_state()
-        all_times = [t0.reshape(-1)]
-        all_states = [state.reshape(1, -1)]
-
         current_t = t0
         current_state = state
+        event_list = []  # (event_t, event_idx)
 
-        # Calculate points per segment based on segment duration
-        t0_val = t0.detach().item() if hasattr(t0, 'detach') else float(t0)
+        for _ in range(max_events):
+            event_t, event_idx, state_at_event = self._find_next_event(
+                current_state, current_t, t_end
+            )
+            if event_t is None:
+                break
+            event_list.append((event_t, event_idx))
+            current_state = self.state_update(state_at_event, event_idx)
+            current_t = event_t
 
-        # Collect segment durations
-        segment_times = []
-        current_t_val = t0_val
-        for event_t in event_times:
-            event_t_val = event_t.detach().item() if hasattr(event_t, 'detach') else float(event_t)
-            segment_times.append((current_t_val, event_t_val))
-            current_t_val = event_t_val
-        # Add final segment
-        if current_t_val < t_end:
-            segment_times.append((current_t_val, t_end))
-
-        # Distribute points proportionally to segment durations
+        # --- Compute points per segment ---
+        t0_val = t0.detach().item()
         total_duration = t_end - t0_val
+        segment_bounds = []
+        prev_t = t0_val
+        for event_t, _ in event_list:
+            et_val = event_t.detach().item()
+            segment_bounds.append((prev_t, et_val))
+            prev_t = et_val
+        if prev_t < t_end:
+            segment_bounds.append((prev_t, t_end))
+
         points_per_segment = []
-        for t_start, t_stop in segment_times:
+        for t_start, t_stop in segment_bounds:
             duration = t_stop - t_start
             n_seg = max(2, int(n_points * duration / total_duration))
             points_per_segment.append(n_seg)
 
-        # Simulate each segment
+        # --- Pass 2: dense integration per segment ---
         current_t = t0
         current_state = state
+        all_times = [t0.reshape(-1)]
+        all_states = [state.reshape(1, -1)]
         seg_idx = 0
 
-        for event_t, event_idx in zip(event_times, event_indices):
-            # Integrate to event
-            current_t_val = current_t.detach().item() if hasattr(current_t, 'detach') else float(current_t)
-            event_t_val = event_t.detach().item() if hasattr(event_t, 'detach') else float(event_t)
+        for event_t, event_idx in event_list:
+            current_t_val = current_t.detach().item()
+            event_t_val = event_t.detach().item()
 
             n_seg = points_per_segment[seg_idx]
             tt = torch.linspace(current_t_val, event_t_val, n_seg)[1:-1]
@@ -289,14 +413,13 @@ class BouncingBallsModel(nn.Module):
                 all_times.append(tt[1:])
                 all_states.append(sol[1:].reshape(-1, 12))
 
-            # Apply state update
             current_state = self.state_update(sol[-1] if len(tt) > 1 else current_state, event_idx)
             current_t = event_t
             seg_idx += 1
 
-        # Final segment if needed
+        # Final segment
         if seg_idx < len(points_per_segment):
-            current_t_val = current_t.detach().item() if hasattr(current_t, 'detach') else float(current_t)
+            current_t_val = current_t.detach().item()
             n_seg = points_per_segment[seg_idx]
             tt = torch.linspace(current_t_val, t_end, n_seg)
             if len(tt) > 1:
@@ -309,60 +432,121 @@ class BouncingBallsModel(nn.Module):
 
         return times, trajectory
 
-    def simulate_at_times(self, target_times: torch.Tensor):
+    def simulate_at_targets(self, target_times: torch.Tensor):
         """
-        Simulate with events and evaluate at specific target times (differentiable).
-        Integrates directly at target times between events, avoiding interpolation.
-        """
-        t_end = target_times[-1].item()
-        event_times, event_indices = self.get_event_times(t_end, max_events=20)
+        Simulate and evaluate at specific target times (differentiable).
 
-        t0, state = self.get_initial_state()
+        Follows the torchdiffeq bouncing ball reference pattern:
+        - Step 1: Detect events using odeint_event (differentiable event times)
+        - Step 2: Re-integrate at target times using plain odeint, with event_t
+          tensors in the time grid to maintain gradient flow through event times.
+
+        Right-continuous at events: targets at event times get post-event state.
+
+        Args:
+            target_times: 1D tensor of sorted evaluation times
+
+        Returns:
+            (n_targets, 12) tensor of states at target times
+        """
+        target_np = target_times.detach().numpy()
+        t_end = float(target_np[-1]) + 1e-6
+        n_targets = len(target_np)
+        eps = 1e-9
+
+        # --- Step 1: Detect events (like reference get_collision_times) ---
+        t0, state0 = self.get_initial_state()
         current_t = t0
-        current_state = state
-        all_states = []
-        target_idx = 0
+        current_state = state0
+        events = []  # (event_t tensor, event_idx int)
 
-        for event_t, event_idx in zip(event_times, event_indices):
-            event_t_val = event_t.detach().item()
-
-            # Find target times in this segment (before event)
-            current_t_val = current_t.detach().item()
-            segment_targets = []
-            while target_idx < len(target_times) and target_times[target_idx].item() <= event_t_val:
-                t_val = target_times[target_idx].item()
-                # Only include if strictly after current time
-                if t_val > current_t_val + 1e-10:
-                    segment_targets.append(target_times[target_idx])
-                target_idx += 1
-
-            if segment_targets:
-                tt = torch.cat([torch.tensor([current_t_val], dtype=torch.float64), torch.stack(segment_targets)])
-                sol = self.odeint(self, current_state, tt, atol=1e-8, rtol=1e-8)
-                all_states.append(sol[1:].reshape(-1, 12))
-
-            # Integrate to event and apply state update
-            current_t_val = current_t.detach().item()
-            tt_event = torch.tensor([current_t_val, event_t_val], dtype=torch.float64)
-            sol_event = self.odeint(self, current_state, tt_event, atol=1e-8, rtol=1e-8)
-            current_state = self.state_update(sol_event[-1], event_idx)
+        for _ in range(20):
+            event_t, event_idx, state_at_event = self._find_next_event(
+                current_state, current_t, t_end
+            )
+            if event_t is None:
+                break
+            events.append((event_t, event_idx))
+            current_state = self.state_update(state_at_event, event_idx)
             current_t = event_t
 
-        # Remaining target times after last event
-        if target_idx < len(target_times):
-            current_t_val = current_t.detach().item()
-            # Filter out any targets too close to current time
-            segment_targets = [t for t in target_times[target_idx:] if t.item() > current_t_val + 1e-10]
+        # --- Step 2: Partition targets into segments ---
+        # Target at event boundary goes to the NEXT segment (post-event)
+        event_vals = [et.detach().item() for et, _ in events]
 
-            if segment_targets:
-                tt = torch.cat([torch.tensor([current_t_val], dtype=torch.float64), torch.stack(segment_targets)])
-                sol = self.odeint(self, current_state, tt, atol=1e-8, rtol=1e-8)
-                all_states.append(sol[1:].reshape(-1, 12))
+        seg_targets = [[] for _ in range(len(events) + 1)]
+        ptr = 0
+        for seg_idx, et_val in enumerate(event_vals):
+            while ptr < n_targets and target_np[ptr] < et_val - eps:
+                seg_targets[seg_idx].append(ptr)
+                ptr += 1
+        while ptr < n_targets:
+            seg_targets[len(events)].append(ptr)
+            ptr += 1
 
-        return torch.cat(all_states, dim=0) if all_states else torch.zeros(0, 12, dtype=torch.float64)
+        # --- Step 3: Evaluate per segment (like reference simulate) ---
+        # Uses plain odeint with event_t in time grid for gradient flow
+        current_t = t0
+        current_state = state0
+        indexed_results = []  # (target_idx, state_tensor)
+
+        for seg_idx in range(len(events) + 1):
+            ct_val = current_t.detach().item()
+            targets = seg_targets[seg_idx]
+
+            # Separate targets at segment start vs strictly after
+            at_start = []
+            after_start = []
+            for tidx in targets:
+                if target_np[tidx] <= ct_val + eps:
+                    at_start.append(tidx)
+                else:
+                    after_start.append(tidx)
+
+            # Targets at segment start get current_state (post-event for seg > 0)
+            for tidx in at_start:
+                indexed_results.append((tidx, current_state))
+
+            if seg_idx < len(events):
+                event_t, event_idx = events[seg_idx]
+
+                # Build time grid: [current_t, target_times..., event_t]
+                tt_list = [current_t.reshape(-1)]
+                for tidx in after_start:
+                    tt_list.append(torch.tensor([target_np[tidx]], dtype=torch.float64))
+                tt_list.append(event_t.reshape(-1))
+                tt = torch.cat(tt_list)
+
+                sol = odeint(self, current_state, tt, atol=1e-8, rtol=1e-8)
+
+                # Record states at interior target times
+                for i, tidx in enumerate(after_start):
+                    indexed_results.append((tidx, sol[1 + i]))
+
+                # State update using state at event_t (like reference)
+                current_state = self.state_update(sol[-1], event_idx)
+                current_t = event_t
+            else:
+                # Last segment (no event at end)
+                if after_start:
+                    tt_list = [current_t.reshape(-1)]
+                    for tidx in after_start:
+                        tt_list.append(torch.tensor([target_np[tidx]], dtype=torch.float64))
+                    tt = torch.cat(tt_list)
+                    sol = odeint(self, current_state, tt, atol=1e-8, rtol=1e-8)
+                    for i, tidx in enumerate(after_start):
+                        indexed_results.append((tidx, sol[1 + i]))
+
+        # Sort by target index and stack
+        indexed_results.sort(key=lambda x: x[0])
+
+        if not indexed_results:
+            return torch.zeros(0, 12, dtype=torch.float64)
+
+        return torch.stack([s for _, s in indexed_results]).reshape(-1, 12)
 
     def get_event_times(self, t_end: float, max_events: int = 20):
-        """Get event times and indices using odeint_event."""
+        """Get event times and indices using optimized event detection."""
         event_times = []
         event_indices = []
 
@@ -371,61 +555,17 @@ class BouncingBallsModel(nn.Module):
         current_state = state
 
         for i in range(max_events):
-            current_t_val = current_t.detach().item() if hasattr(current_t, 'detach') else float(current_t)
-            if current_t_val >= t_end:
+            event_t, event_idx, state_at_event = self._find_next_event(
+                current_state, current_t, t_end
+            )
+            if event_t is None:
                 break
 
-            # Find next event - try each event function
-            next_event_t = None
-            next_event_idx = None
+            event_times.append(event_t)
+            event_indices.append(event_idx)
 
-            for ev_idx in range(15):
-                try:
-                    # Create single-event function for this event
-                    def single_event_fn(t, s):
-                        events = self.event_fn(t, s)
-                        return events[ev_idx]
-
-                    event_t, solution = odeint_event(
-                        self,
-                        current_state,
-                        current_t,
-                        event_fn=single_event_fn,
-                        reverse_time=False,
-                        atol=1e-8,
-                        rtol=1e-8,
-                        odeint_interface=self.odeint,
-                    )
-
-                    # Check if this event is sooner (use .item() to avoid gradient warnings)
-                    event_t_val = event_t.detach().item() if hasattr(event_t, 'detach') else float(event_t)
-                    if event_t_val < t_end:
-                        next_event_t_val = next_event_t.detach().item() if (next_event_t is not None and hasattr(next_event_t, 'detach')) else (float(next_event_t) if next_event_t is not None else None)
-                        if next_event_t is None or event_t_val < next_event_t_val:
-                            next_event_t = event_t
-                            next_event_idx = ev_idx
-
-                except:
-                    pass
-
-            if next_event_t is None:
-                break
-
-            event_times.append(next_event_t)
-            event_indices.append(next_event_idx)
-
-            # Update state at event
-            # Integrate to event first
-            current_t_val = current_t.detach().item() if hasattr(current_t, 'detach') else float(current_t)
-            next_event_t_val = next_event_t.detach().item() if hasattr(next_event_t, 'detach') else float(next_event_t)
-            tt = torch.linspace(current_t_val, next_event_t_val, 10)
-            if len(tt) > 1:
-                sol = self.odeint(self, current_state, tt, atol=1e-8, rtol=1e-8)
-                current_state = self.state_update(sol[-1], next_event_idx)
-            else:
-                current_state = self.state_update(current_state, next_event_idx)
-
-            current_t = next_event_t
+            current_state = self.state_update(state_at_event, event_idx)
+            current_t = event_t
 
         return event_times, event_indices
 

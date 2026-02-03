@@ -2,8 +2,8 @@ dae_solver:
   atol: 1.0e-8
   rtol: 1.0e-8
   start_time: 0.0
-  stop_time: 2.00
-  ncp: 100
+  stop_time: 2.0
+  ncp: 1000
   dae_specification_file: dae_examples/dae_specification_bouncing_balls.json
   
 optimizer:
@@ -11,7 +11,7 @@ optimizer:
   algorithm:
     type: "ADAM"  # "SGD" or "ADAM"
     params:
-      step_size: 0.001
+      step_size: 0.005
       # Adam-specific parameters (ignored for SGD):
       beta1: 0.9
       beta2: 0.999
@@ -19,17 +19,18 @@ optimizer:
   blend_sharpness: 300
   prediction_method: sigmoid  # 'sigmoid', 'linear', or 'hermite'
   max_segments: 3
-  max_points_per_segment: 100
+  downsample_segments: true
+  all_segments: false  
+  max_points_per_segment: 200
+  sim_top_time: true
   opt_params:
     - e_g
     - e_b
-  max_iterations: 300
+  max_iterations: 100
   tol: 1.0e-8
   print_every: 1
-  max_blocks: 20
-  max_targets: 700 # 1.2 * ncp
-  downsample_segments: true
-  all_segments: false
+  max_blocks: 15
+  max_targets: 1200 # 1.2 * ncp
   device: cpu
   gpu_memory_fraction: 0.9
 

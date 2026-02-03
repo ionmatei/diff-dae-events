@@ -702,6 +702,8 @@ class DAESparseBlockGradient:
         
         print(f"Adam optimization (Sparse Block): {len(p_init)} parameters, max_iter={max_iter}, lr={step_size}")
         
+        iter_times = []
+
         for it in range(1, max_iter + 1):
             iter_start_time = time.time()
             
@@ -735,6 +737,7 @@ class DAESparseBlockGradient:
             loss_history.append(0.0) # Placeholder as loss calculation is inside JIT
             
             iter_time = time.time() - iter_start_time
+            iter_times.append(iter_time * 1000.0)
             
             p_print = p_current[jnp.array(opt_param_indices)]
             if it % print_every == 0 or it == 1:
@@ -754,10 +757,17 @@ class DAESparseBlockGradient:
             
             p_current = p_current - step_size * m_hat / (jnp.sqrt(v_hat) + epsilon)
             
+        # Calculate average iteration time (excluding first)
+        if len(iter_times) > 1:
+            avg_iter_time = sum(iter_times[1:]) / (len(iter_times) - 1)
+        else:
+            avg_iter_time = 0.0
+            
         return {
             'p_opt': p_current,
             'n_iter': it,
             'converged': converged,
             'grad_norm_history': grad_norm_history,
-            'loss_history': loss_history
+            'loss_history': loss_history,
+            'avg_iter_time': avg_iter_time
         }

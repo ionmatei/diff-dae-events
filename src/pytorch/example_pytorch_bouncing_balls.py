@@ -108,27 +108,21 @@ class DAEOptimizerPyTorchMultiEvent:
 
     def _compute_loss(
         self,
-        t_end: float,
         target_times: torch.Tensor,
         target_data: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute loss by simulating and interpolating (like single ball example).
+        Compute loss by simulating directly at target times (no interpolation).
+        Uses simulate_at_targets which follows the torchdiffeq reference pattern.
+
+        Only matches position states (x, y) which are continuous across events.
+        Velocity states are discontinuous at event boundaries and cause spurious
+        errors when PyTorch and DAE event times don't exactly match.
         """
-        # Simulate with events (n_points total across all segments)
-        times, trajectory = self.model.simulate_fixed_grid(t_end, n_points=self.model.ncp)
-
-        # Interpolate predictions to target times (for all 12 states)
-        n_states = 12
-        y_pred = torch.zeros(len(target_times), n_states, dtype=torch.float64)
-
-        for i in range(n_states):
-            y_pred[:, i] = self._differentiable_interp(
-                times, trajectory[:, i], target_times
-            )
-
-        # MSE loss
-        loss = torch.mean((y_pred - target_data) ** 2)
+        y_pred = self.model.simulate_at_targets(target_times)
+        # Position indices: x1=0, y1=1, x2=4, y2=5, x3=8, y3=9
+        pos_idx = [0, 1, 4, 5, 8, 9]
+        loss = torch.mean((y_pred[:, pos_idx] - target_data[:, pos_idx]) ** 2)
         return loss
 
     def optimize(
@@ -192,7 +186,8 @@ class DAEOptimizerPyTorchMultiEvent:
         # Convert targets to tensors (once)
         target_times_t = torch.tensor(target_times, dtype=torch.float64)
         target_data_t = torch.tensor(target_data, dtype=torch.float64)
-        t_end = t_span[1]
+
+        iter_times = []
 
         for it in range(max_iterations):
             iter_start = time.time()
@@ -201,7 +196,7 @@ class DAEOptimizerPyTorchMultiEvent:
             optimizer.zero_grad()
 
             # Forward pass
-            loss = self._compute_loss(t_end, target_times_t, target_data_t)
+            loss = self._compute_loss(target_times_t, target_data_t)
 
             # Backward pass
             loss.backward()
@@ -228,6 +223,7 @@ class DAEOptimizerPyTorchMultiEvent:
             history['params'].append(p_current.copy())
 
             iter_time = (time.time() - iter_start) * 1000.0  # ms
+            iter_times.append(iter_time)
 
             if it % print_every == 0 or it == 0:
                 param_str = " ".join([f"{p.item():.4f}" for p in self.opt_params])
@@ -264,6 +260,12 @@ class DAEOptimizerPyTorchMultiEvent:
 
         # Final parameters
         p_final = np.concatenate([p.detach().numpy().flatten() for p in self.opt_params])
+        
+        # Calculate average iteration time (excluding first)
+        if len(iter_times) > 1:
+            avg_iter_time = sum(iter_times[1:]) / (len(iter_times) - 1)
+        else:
+            avg_iter_time = 0.0
 
         if self.verbose:
             print(f"\nOptimization complete in {elapsed:.2f}s")
@@ -275,8 +277,96 @@ class DAEOptimizerPyTorchMultiEvent:
             'history': history,
             'elapsed_time': elapsed,
             'converged': converged,
-            'n_iter': len(history['loss'])
+            'n_iter': len(history['loss']),
+            'avg_iter_time': avg_iter_time
         }
+
+
+
+def create_animation(times, traj_opt, traj_true, x_min, x_max, y_min, y_max, filename='bouncing_balls_animation.mp4'):
+    """Create a 2D animation of the bouncing balls."""
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.animation import FuncAnimation
+    except ImportError:
+        print("Matplotlib not available, skipping animation.")
+        return
+
+    n_balls = 3
+    fig, ax = plt.subplots(figsize=(8, 8))
+    
+    # Static background: True trajectories and initial positions
+    for i in range(n_balls):
+        idx = i * 4
+        # True trajectory (faint)
+        ax.plot(traj_true[:, idx], traj_true[:, idx+1], 'b-', alpha=0.2, linewidth=1, label='Target Trajectory' if i==0 else None)
+        # Initial position
+        ax.plot(traj_true[0, idx], traj_true[0, idx+1], 'bx', markersize=8, alpha=0.6, label='Initial Target' if i==0 else None)
+
+    # Dynamic elements: Optimized balls
+    balls = []
+    trails = []
+    # Distinct colors for the 3 optimized balls
+    colors = ['#FF5733', '#33FF57', '#3357FF'] 
+    
+    for i in range(n_balls):
+        ball, = ax.plot([], [], 'o', color=colors[i], markersize=12, markeredgecolor='k', label=f'Optimized Ball {i+1}')
+        trail, = ax.plot([], [], '-', color=colors[i], alpha=0.5, linewidth=1.5)
+        balls.append(ball)
+        trails.append(trail)
+
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.3)
+    ax.set_xlabel('X Position')
+    ax.set_ylabel('Y Position')
+    ax.set_title('Bouncing Balls Optimization: Validation Animation')
+    ax.legend(loc='upper right')
+    
+    # Animation update function
+    def update(frame):
+        artists = []
+        for i in range(n_balls):
+            idx = i * 4
+            x = traj_opt[frame, idx]
+            y = traj_opt[frame, idx+1]
+            balls[i].set_data([x], [y])
+            
+            # Trail (last 50 frames)
+            start_frame = max(0, frame - 50)
+            trail_x = traj_opt[start_frame:frame+1, idx]
+            trail_y = traj_opt[start_frame:frame+1, idx+1]
+            trails[i].set_data(trail_x, trail_y)
+            artists.append(balls[i])
+            artists.append(trails[i])
+        return artists
+    
+    # Downsample if too many frames to keep file size reasonable
+    n_frames = len(times)
+    # Target ~400 frames max
+    step = max(1, n_frames // 400) 
+    frames = range(0, n_frames, step)
+    
+    print(f"Creating animation ({len(frames)} frames)...")
+    anim = FuncAnimation(fig, update, frames=frames, interval=30, blit=True)
+    
+    # Save
+    try:
+        # Try MP4 first (requires ffmpeg)
+        anim.save(filename, writer='ffmpeg', fps=30)
+        print(f"  Animation saved to: {filename}")
+    except Exception as e:
+        print(f"  Could not save MP4 (ffmpeg might be missing): {e}")
+        try:
+            # Fallback to GIF (requires pillow)
+            gif_filename = filename.replace('.mp4', '.gif')
+            anim.save(gif_filename, writer='pillow', fps=30)
+            print(f"  Animation saved to: {gif_filename}")
+        except Exception as e2:
+             print(f"  Could not save GIF either: {e2}")
+
+    plt.close(fig)
 
 
 def run_bouncing_balls_test(config: dict):
@@ -419,37 +509,43 @@ def run_bouncing_balls_test(config: dict):
     # =========================================================================
     # Step 4: Results
     # =========================================================================
-    print("\n" + "-" * 40)
-    print("Step 4: Results")
-    print("-" * 40)
-
-    # Extract optimized values
-    params_final = result['params']
-
-    # Map back to names
-    p_opt_dict = {}
+    print("\n" + "=" * 70)
+    print("Optimization Result")
+    print("=" * 70)
+    
+    # Construct mappings
+    p_true_subset = {k: p_true[k] for k in optimize_params}
+    
+    # Initial values map
+    p_init_subset = {}
+    for name in optimize_params:
+         if name == 'g': p_init_subset[name] = g_init
+         elif name == 'e_g': p_init_subset[name] = e_g_init
+         else: p_init_subset[name] = e_b_init
+            
+    # Optimized values map
+    # params_final is flat list/array from optimizer result
+    p_opt_subset = {}
     for i, name in enumerate(optimize_params):
-        p_opt_dict[name] = params_final[i]
+        p_opt_subset[name] = float(result['params'][i])
 
-    print(f"\n  Parameter Recovery:")
+    print(f"True params:      {p_true_subset}")
+    print(f"Initial params:   {p_init_subset}")
+    print(f"Optimized params: {p_opt_subset}")
+    print(f"Iterations:       {result['n_iter']}")
+    print(f"Converged:        {result['converged']}")
+    print(f"Final loss:       {result['history']['loss'][-1]:.6e}")
+    # Gradient norm is tracked in history
+    print(f"Final |grad|:     {result['history']['gradient_norm'][-1]:.6e}")
+    if 'avg_iter_time' in result:
+        print(f"Avg iter time:    {result['avg_iter_time']:.2f} ms")
+
+    # Per-parameter error
     for name in optimize_params:
         true_val = p_true[name]
-        opt_val = p_opt_dict[name]
-        if name == 'g':
-            init_val = g_init
-        elif name == 'e_g':
-            init_val = e_g_init
-        else:
-            init_val = e_b_init
-        error = abs(opt_val - true_val)
-        print(f"    {name:4s}: True={true_val:.6f}, Init={init_val:.6f}, Opt={opt_val:.6f}, Error={error:.6e}")
-
-    print(f"\n  Optimization Stats:")
-    print(f"    Initial loss: {result['history']['loss'][0]:.6e}")
-    print(f"    Final loss:   {result['history']['loss'][-1]:.6e}")
-    print(f"    Converged:    {result['converged']}")
-    print(f"    Iterations:   {result['n_iter']}")
-    print(f"    Time:         {result['elapsed_time']:.2f}s")
+        opt_val = p_opt_subset[name]
+        err = abs(opt_val - true_val)
+        print(f"  {name}: true={true_val:.4f}  opt={opt_val:.4f}  err={err:.6e}")
 
     # =========================================================================
     # Step 5: Validate by re-simulating with PyTorch model
@@ -458,22 +554,23 @@ def run_bouncing_balls_test(config: dict):
     print("Step 5: Validation")
     print("-" * 40)
 
-    # Simulate with optimized parameters using PyTorch model
+    # Simulate with optimized parameters using the same method as optimization
+    t_end_val = float(t_target[-1]) + 1e-6
     with torch.no_grad():
-        times_opt, traj_opt, event_times_opt, event_indices_opt = model_opt.simulate(
-            t_span[1], max_events=max_events
-        )
+        times_opt, traj_opt = model_opt.simulate_fixed_grid(t_end_val, n_points=ncp)
 
-    # Interpolate at target times (all 12 states)
     times_opt_np = times_opt.numpy()
     traj_opt_np = traj_opt.numpy()
-    y_opt = np.zeros((len(t_target), 12))
 
-    for i in range(12):
-        y_opt[:, i] = np.interp(t_target, times_opt_np, traj_opt_np[:, i])
+    # Position-only error (matches the loss used in optimization)
+    pos_idx = [0, 1, 4, 5, 8, 9]
+    y_opt_pos = np.zeros((len(t_target), len(pos_idx)))
+    y_tgt_pos = y_target[:, pos_idx]
+    for i, si in enumerate(pos_idx):
+        y_opt_pos[:, i] = np.interp(t_target, times_opt_np, traj_opt_np[:, si])
 
-    traj_error = np.linalg.norm(y_opt - y_target) / np.linalg.norm(y_target)
-    print(f"  Trajectory relative error: {traj_error:.6e}")
+    traj_error = np.linalg.norm(y_opt_pos - y_tgt_pos) / np.linalg.norm(y_tgt_pos)
+    print(f"  Trajectory relative error (positions): {traj_error:.6e}")
 
     # Extract true trajectory from DAESolver segments for plotting
     all_t_true = []
@@ -543,18 +640,31 @@ def run_bouncing_balls_test(config: dict):
         ax.set_title('Gradient Norm History')
         ax.grid(True, alpha=0.3)
 
-        # Segment count history
+        # Parameter history
         ax = axes[2, 2]
-        ax.plot(result['history']['n_segments'], 'g-', linewidth=2)
+        param_hist = np.array(result['history']['params'])
+        for i, name in enumerate(optimize_params):
+            true_val = p_true[name]
+            ax.plot(param_hist[:, i], linewidth=2, label=f'{name}')
+            ax.axhline(true_val, linestyle='--', alpha=0.5)
         ax.set_xlabel('Iteration')
-        ax.set_ylabel('Number of Segments')
-        ax.set_title('Segment Count History')
+        ax.set_ylabel('Parameter Value')
+        ax.set_title('Parameter History')
+        ax.legend()
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
         output_path = 'bouncing_balls_pytorch_result.png'
         plt.savefig(output_path, dpi=150)
         print(f"\n  Plot saved to: {output_path}")
+        
+        # Create Animation
+        print("\n  Generating animation...")
+        create_animation(
+            times_opt_np, traj_opt_np, traj_true_np,
+            x_min, x_max, y_min, y_max,
+            filename='bouncing_balls_validation.mp4'
+        )
 
     except ImportError:
         print("\n  Matplotlib not available - skipping plots")

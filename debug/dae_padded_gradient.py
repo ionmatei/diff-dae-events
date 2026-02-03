@@ -1263,6 +1263,8 @@ class DAEPaddedGradient:
         tt_device, td_device = jax.device_put((tt_padded, td_padded))
         n_tgt_device = jax.device_put(jnp.int32(n_tgt))
 
+        iter_times = []
+
         for it in range(1, max_iter + 1):
             t0 = time.perf_counter()
 
@@ -1304,6 +1306,7 @@ class DAEPaddedGradient:
             p_current = p_current.at[jnp.array(opt_param_indices)].add(-step)
 
             elapsed = (time.perf_counter() - t0) * 1000.0
+            iter_times.append(elapsed)
             n_segments = len(sol.segments)
 
             if it % print_every == 0 or it == 1:
@@ -1316,6 +1319,12 @@ class DAEPaddedGradient:
                 converged = True
                 break
 
+        # Calculate average iteration time (excluding first)
+        if len(iter_times) > 1:
+            avg_iter_time = sum(iter_times[1:]) / (len(iter_times) - 1)
+        else:
+            avg_iter_time = 0.0
+
         print(f"Adam finished: {it} iterations, final loss={loss_history[-1]:.6e}")
         return {
             'p_opt': p_current,
@@ -1323,4 +1332,5 @@ class DAEPaddedGradient:
             'grad_norm_history': grad_norm_history,
             'n_iter': it,
             'converged': converged,
+            'avg_iter_time': avg_iter_time
         }

@@ -86,12 +86,14 @@ def run_optimization_test():
     max_targets = opt_cfg['max_targets']
     downsample_segments = opt_cfg.get('downsample_segments', False)
     all_segments = opt_cfg.get('all_segments', False)
+    sim_top_time = opt_cfg.get('sim_top_time', False)
 
     # Resolve optimized parameter indices
     param_names = [p['name'] for p in dae_data['parameters']]
     opt_param_names = opt_cfg['opt_params']
     opt_param_indices = [param_names.index(n) for n in opt_param_names]
     print(f"Optimized parameters: {opt_param_names} (indices {opt_param_indices})")
+    print(f"Adaptive Horizon (sim_top_time): {sim_top_time}")
 
     # --- 2. Ground truth ---
     true_p = [p['value'] for p in dae_data['parameters']]
@@ -145,7 +147,7 @@ def run_optimization_test():
         epsilon=epsilon,
         blend_sharpness=blend_sharpness,
         print_every=print_every,
-        adaptive_horizon=False
+        adaptive_horizon=sim_top_time
     )
 
     # --- 5. Report ---
@@ -160,6 +162,8 @@ def run_optimization_test():
     print(f"Converged:        {result['converged']}")
     print(f"Final loss:       {result['loss_history'][-1]:.6e}")
     print(f"Final |grad|:     {result['grad_norm_history'][-1]:.6e}")
+    if 'avg_iter_time' in result:
+        print(f"Avg iter time:    {result['avg_iter_time']:.2f} ms")
 
     # Per-parameter error
     for name in opt_param_names:
@@ -173,7 +177,8 @@ def run_optimization_test():
 
     # Run solver with optimized parameters
     solver.update_parameters(p_opt)
-    sol_opt = solver.solve_augmented(t_span, ncp=ncp)
+    max_segs = max_blocks // 2
+    sol_opt = solver.solve_augmented(t_span, ncp=ncp, max_segments=max_segs)
 
     # Flatten simulated data for plotting (concatenating segments)
     sim_t = []

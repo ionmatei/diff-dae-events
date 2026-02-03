@@ -157,6 +157,8 @@ def run_optimization_test():
     print(f"Converged:        {result['converged']}")
     print(f"Final loss:       {result['loss_history'][-1]:.6e}")
     print(f"Final |grad|:     {result['grad_norm_history'][-1]:.6e}")
+    if 'avg_iter_time' in result:
+        print(f"Avg iter time:    {result['avg_iter_time']:.2f} ms")
 
     # Per-parameter error
     for name in opt_param_names:
@@ -170,7 +172,8 @@ def run_optimization_test():
 
     # Run solver with optimized parameters
     solver.update_parameters(p_opt)
-    sol_opt = solver.solve_augmented(t_span, ncp=ncp)
+    max_segs = max_blocks // 2
+    sol_opt = solver.solve_augmented(t_span, ncp=ncp, max_segments=max_segs)
 
     # Flatten simulated data for plotting (concatenating segments)
     sim_t = []

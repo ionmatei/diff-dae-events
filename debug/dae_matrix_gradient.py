@@ -353,7 +353,7 @@ class DAEMatrixGradient:
 
             return jnp.concatenate([r.flatten() for r in residuals])
 
-        def loss_fn(W_flat, p, grid_taus, target_times, target_data, t_final_val, blend_sharpness=150.0):
+        def loss_fn(W_flat, p, grid_taus, target_times, target_data, t_final_val, blend_sharpness=150.0, adaptive_horizon=False):
             # Unpack W into trajectory for prediction
             # Logic similar to residual but just extracting (t, y)
 
@@ -439,16 +439,25 @@ class DAEMatrixGradient:
             
             # Loss: MSE
             diff = predictions - target_data
-            return jnp.mean(jnp.square(diff))
+            diff_sq = jnp.square(diff)
+            
+            if adaptive_horizon:
+                mask = (target_times <= t_final_val).astype(jnp.float64)
+                mask_expanded = mask[:, None]
+                sum_sq = jnp.sum(diff_sq * mask_expanded)
+                count = jnp.sum(mask) * n_x
+                return sum_sq / (count + 1e-12)
+            else:
+                return jnp.mean(diff_sq)
 
-        def compute_grads(W_flat, p_val, grid_taus, target_times, target_data, t_final_val, blend_sharpness):
+        def compute_grads(W_flat, p_val, grid_taus, target_times, target_data, t_final_val, blend_sharpness, adaptive_horizon=False):
             # 1. Residual Jacobians
             J_W = jax.jacfwd(residual_fn, argnums=0)(W_flat, p_val, grid_taus, t_final_val)
             J_p = jax.jacfwd(residual_fn, argnums=1)(W_flat, p_val, grid_taus, t_final_val)
 
             # 2. Loss Gradients
-            loss_val, dL_dW = jax.value_and_grad(loss_fn, argnums=0)(W_flat, p_val, grid_taus, target_times, target_data, t_final_val, blend_sharpness)
-            dL_dp = jax.grad(loss_fn, argnums=1)(W_flat, p_val, grid_taus, target_times, target_data, t_final_val, blend_sharpness)
+            loss_val, dL_dW = jax.value_and_grad(loss_fn, argnums=0)(W_flat, p_val, grid_taus, target_times, target_data, t_final_val, blend_sharpness, adaptive_horizon=adaptive_horizon)
+            dL_dp = jax.grad(loss_fn, argnums=1)(W_flat, p_val, grid_taus, target_times, target_data, t_final_val, blend_sharpness, adaptive_horizon=adaptive_horizon)
 
             # 3. Adjoint Solve
             lam = jnp.linalg.solve(J_W.T, -dL_dW)
@@ -458,7 +467,7 @@ class DAEMatrixGradient:
             return loss_val, total_grad
 
         # Compile
-        jit_kernel = jax.jit(compute_grads)
+        jit_kernel = jax.jit(compute_grads, static_argnames=['adaptive_horizon'])
         self._kernel_cache[struct_key] = jit_kernel
         return jit_kernel
 
@@ -548,7 +557,7 @@ class DAEMatrixGradient:
         n_x, n_z, n_p = self.dims
         n_w = n_x + n_z
 
-        def loss_fn(W_flat, p, grid_taus, target_times, target_data, t_final_val, blend_sharpness=150.0):
+        def loss_fn(W_flat, p, grid_taus, target_times, target_data, t_final_val, blend_sharpness=150.0, adaptive_horizon=False):
             idx_scan = 0
             event_vals = []
             for kind, count, *extra in structure:
@@ -612,24 +621,40 @@ class DAEMatrixGradient:
 
             predictions = jax.vmap(predict_at_t)(target_times)
             diff = predictions - target_data
-            return jnp.mean(jnp.square(diff))
+            diff_sq = jnp.square(diff)
+            
+            # Reduce mean with optional adaptive horizon mask
+            if adaptive_horizon:
+                # Mask targets after t_final_val
+                # We assume target_times is sorted or just check against t_final
+                mask = (target_times <= t_final_val).astype(jnp.float64)
+                # Expand mask for broadcasting against data dimensions (n_targets, n_x) 
+                # predictions shape: (n_targets, n_x) -> mask shape (n_targets, 1)
+                mask_expanded = mask[:, None]
+                
+                sum_sq = jnp.sum(diff_sq * mask_expanded)
+                # Count valid elements (avoid divide by zero)
+                count = jnp.sum(mask) * n_x
+                return sum_sq / (count + 1e-12)
+            else:
+                return jnp.mean(diff_sq)
 
-        def loss_and_grad(W_flat, p_val, grid_taus, target_times, target_data, t_final_val, blend_sharpness):
+        def loss_and_grad(W_flat, p_val, grid_taus, target_times, target_data, t_final_val, blend_sharpness, adaptive_horizon=False):
             return jax.value_and_grad(loss_fn, argnums=0)(
-                W_flat, p_val, grid_taus, target_times, target_data, t_final_val, blend_sharpness
+                W_flat, p_val, grid_taus, target_times, target_data, t_final_val, blend_sharpness, adaptive_horizon=adaptive_horizon
             )
 
-        jit_kernel = jax.jit(loss_and_grad)
+        jit_kernel = jax.jit(loss_and_grad, static_argnames=['adaptive_horizon'])
         self._kernel_cache[struct_key] = jit_kernel
         return jit_kernel
 
-    def compute_loss_and_loss_grad_W(self, sol, p_val, target_times, target_data, blend_sharpness=150.0):
+    def compute_loss_and_loss_grad_W(self, sol, p_val, target_times, target_data, blend_sharpness=150.0, adaptive_horizon=False):
         """Returns (loss_val, dL_dW_flat, W_flat, structure)."""
         t_final = sol.segments[-1].t[-1] if sol.segments else 2.0
         W_flat, structure, grid_taus_list = self.pack_solution(sol)
         grid_taus_tuple = tuple(grid_taus_list)
         kernel = self._get_loss_grad_kernel(structure)
-        loss_val, dL_dW = kernel(W_flat, p_val, grid_taus_tuple, target_times, target_data, t_final, blend_sharpness)
+        loss_val, dL_dW = kernel(W_flat, p_val, grid_taus_tuple, target_times, target_data, t_final, blend_sharpness, adaptive_horizon=adaptive_horizon)
         return loss_val, dL_dW, W_flat, structure
 
     def _get_full_adjoint_kernel(self, structure):
@@ -804,22 +829,22 @@ class DAEMatrixGradient:
             total_grad = dL_dp + jnp.dot(lam, J_p)
             return loss_val, dL_dW, dL_dp, lam, total_grad
 
-        jit_kernel = jax.jit(full_adjoint)
+        jit_kernel = jax.jit(full_adjoint, static_argnames=['adaptive_horizon'])
         self._kernel_cache[struct_key] = jit_kernel
         return jit_kernel
 
-    def compute_full_adjoint(self, sol, p_val, target_times, target_data, blend_sharpness=150.0):
+    def compute_full_adjoint(self, sol, p_val, target_times, target_data, blend_sharpness=150.0, adaptive_horizon=False):
         """Returns (loss, dL_dW, dL_dp, lam, total_grad, W_flat, structure)."""
         t_final = sol.segments[-1].t[-1] if sol.segments else 2.0
         W_flat, structure, grid_taus_list = self.pack_solution(sol)
         grid_taus_tuple = tuple(grid_taus_list)
         kernel = self._get_full_adjoint_kernel(structure)
         loss_val, dL_dW, dL_dp, lam, total_grad = kernel(
-            W_flat, p_val, grid_taus_tuple, target_times, target_data, t_final, blend_sharpness
+            W_flat, p_val, grid_taus_tuple, target_times, target_data, t_final, blend_sharpness, adaptive_horizon=adaptive_horizon
         )
         return loss_val, dL_dW, dL_dp, lam, total_grad, W_flat, structure
 
-    def compute_total_gradient(self, sol, p_val, target_times, target_data, blend_sharpness=150.0):
+    def compute_total_gradient(self, sol, p_val, target_times, target_data, blend_sharpness=150.0, adaptive_horizon=False):
         # 1. Pack
         t_final = sol.segments[-1].t[-1] if sol.segments else 2.0
 
@@ -830,7 +855,7 @@ class DAEMatrixGradient:
         kernel = self._get_gradient_kernel(structure)
 
         # 3. Compute
-        loss_val, grad_p = kernel(W_flat, p_val, grid_taus_tuple, target_times, target_data, t_final, blend_sharpness)
+        loss_val, grad_p = kernel(W_flat, p_val, grid_taus_tuple, target_times, target_data, t_final, blend_sharpness, adaptive_horizon=adaptive_horizon)
 
         return loss_val, grad_p
 
@@ -850,7 +875,8 @@ class DAEMatrixGradient:
     def optimize_adam(self, solver, p_init, opt_param_indices, target_times, target_data,
                       t_span, ncp, max_iter=150, tol=1e-8, step_size=0.01,
                       beta1=0.9, beta2=0.999, epsilon=1e-8,
-                      blend_sharpness=150.0, print_every=10):
+                      blend_sharpness=150.0, print_every=10,
+                      adaptive_horizon=False):
         
         n_opt = len(opt_param_indices)
         p_current = jnp.array(p_init, dtype=jnp.float64)
@@ -863,6 +889,8 @@ class DAEMatrixGradient:
         converged = False
 
         print(f"Adam optimization (Matrix Direct): {n_opt} parameters, max_iter={max_iter}, lr={step_size}")
+
+        iter_times = []
 
         for it in range(1, max_iter + 1):
             t0 = time.perf_counter()
@@ -878,7 +906,9 @@ class DAEMatrixGradient:
                 break
                 
             # Compute Gradient
-            loss_val_d, total_grad = self.compute_total_gradient(sol, p_current, target_times, target_data, blend_sharpness)
+            loss_val_d, total_grad = self.compute_total_gradient(
+                sol, p_current, target_times, target_data, blend_sharpness, adaptive_horizon
+            )
             total_grad.block_until_ready()
             
             grad_opt = total_grad[jnp.array(opt_param_indices)]
@@ -900,6 +930,7 @@ class DAEMatrixGradient:
             p_current = p_current.at[jnp.array(opt_param_indices)].add(-step)
 
             elapsed = (time.perf_counter() - t0) * 1000.0
+            iter_times.append(elapsed)
 
             if it % print_every == 0 or it == 1:
                 print(f"  Iter {it:4d} | loss={loss_val:.6e} | |grad|={grad_norm:.6e} | p={np.asarray(p_current[jnp.array(opt_param_indices)])} | {elapsed:.1f} ms")
@@ -907,11 +938,18 @@ class DAEMatrixGradient:
             if grad_norm < tol:
                 converged = True
                 break
+        
+        # Calculate average iteration time (excluding first)
+        if len(iter_times) > 1:
+            avg_iter_time = sum(iter_times[1:]) / (len(iter_times) - 1)
+        else:
+            avg_iter_time = 0.0
                 
         return {
             'p_opt': p_current,
             'n_iter': it,
             'converged': converged,
             'grad_norm_history': grad_norm_history,
-            'loss_history': loss_history
+            'loss_history': loss_history,
+            'avg_iter_time': avg_iter_time
         }
