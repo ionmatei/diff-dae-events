@@ -57,6 +57,94 @@ def prepare_loss_targets(sol, n_x, t_start, t_end):
     return target_times, target_data
 
 
+
+def create_animation(times, traj_opt, traj_true, x_min, x_max, y_min, y_max, filename='bouncing_balls_animation.mp4'):
+    """Create a 2D animation of the bouncing balls."""
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.animation import FuncAnimation
+    except ImportError:
+        print("Matplotlib not available, skipping animation.")
+        return
+
+    n_balls = 3
+    fig, ax = plt.subplots(figsize=(8, 8))
+    
+    # Static background: True trajectories and initial positions
+    for i in range(n_balls):
+        idx = i * 4
+        # True trajectory (faint)
+        if traj_true.shape[0] > 0:
+            ax.plot(traj_true[:, idx], traj_true[:, idx+1], 'b-', alpha=0.2, linewidth=1, label='Target Trajectory' if i==0 else None)
+            # Initial position
+            ax.plot(traj_true[0, idx], traj_true[0, idx+1], 'bx', markersize=8, alpha=0.6, label='Initial Target' if i==0 else None)
+
+    # Dynamic elements: Optimized balls
+    balls = []
+    trails = []
+    # Distinct colors for the 3 optimized balls
+    colors = ['#FF5733', '#33FF57', '#3357FF'] 
+    
+    for i in range(n_balls):
+        ball, = ax.plot([], [], 'o', color=colors[i], markersize=28, markeredgecolor='k', label=f'Optimized Ball {i+1}')
+        trail, = ax.plot([], [], '-', color=colors[i], alpha=0.5, linewidth=1.5)
+        balls.append(ball)
+        trails.append(trail)
+
+    ax.set_xlim(x_min-1, x_max+1)
+    ax.set_ylim(y_min-1, y_max+1)
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.3)
+    ax.set_xlabel('X Position')
+    ax.set_ylabel('Y Position')
+    ax.set_title('Bouncing Balls Optimization: Validation Animation')
+    ax.legend(loc='upper right')
+    
+    # Animation update function
+    def update(frame):
+        artists = []
+        for i in range(n_balls):
+            idx = i * 4
+            x = traj_opt[frame, idx]
+            y = traj_opt[frame, idx+1]
+            balls[i].set_data([x], [y])
+            
+            # Trail (last 50 frames)
+            start_frame = max(0, frame - 50)
+            trail_x = traj_opt[start_frame:frame+1, idx]
+            trail_y = traj_opt[start_frame:frame+1, idx+1]
+            trails[i].set_data(trail_x, trail_y)
+            artists.append(balls[i])
+            artists.append(trails[i])
+        return artists
+    
+    # Downsample if too many frames to keep file size reasonable
+    n_frames = len(times)
+    # Target ~400 frames max
+    step = max(1, n_frames // 400) 
+    frames = range(0, n_frames, step)
+    
+    print(f"Creating animation ({len(frames)} frames)...")
+    anim = FuncAnimation(fig, update, frames=frames, interval=30, blit=True)
+    
+    # Save
+    try:
+        # Try MP4 first (requires ffmpeg)
+        anim.save(filename, writer='ffmpeg', fps=30)
+        print(f"  Animation saved to: {filename}")
+    except Exception as e:
+        print(f"  Could not save MP4 (ffmpeg might be missing): {e}")
+        try:
+            # Fallback to GIF (requires pillow)
+            gif_filename = filename.replace('.mp4', '.gif')
+            anim.save(gif_filename, writer='pillow', fps=30)
+            print(f"  Animation saved to: {gif_filename}")
+        except Exception as e2:
+             print(f"  Could not save GIF either: {e2}")
+
+    plt.close(fig)
+
+
 def run_optimization_test():
     print("=" * 70)
     print("TEST: Adam Optimization on Bouncing Balls DAE (3 balls)")
@@ -267,6 +355,33 @@ def run_optimization_test():
     plot_path = os.path.join(current_dir, 'optimization_result_balls.png')
     plt.savefig(plot_path, dpi=150)
     print(f"Plot saved to: {plot_path}")
+    
+    # --- 7. Animation ---
+    print("\nGenerating animation...")
+    
+    # Reconstruction of true trajectory for animation
+    true_sim_t = []
+    true_sim_x = []
+    for seg in sol_true.segments:
+        if len(seg.t) > 0:
+            true_sim_t.append(seg.t)
+            true_sim_x.append(seg.x)
+    
+    if true_sim_t:
+        traj_true = np.concatenate(true_sim_x)
+    else:
+        traj_true = np.zeros((0, n_x))
+
+    # Get bounds
+    p_dict = dict(zip(param_names, true_p))
+    x_min, x_max = p_dict['x_min'], p_dict['x_max']
+    y_min, y_max = p_dict['y_min'], p_dict['y_max']
+
+    create_animation(
+        sim_t, sim_x, traj_true,
+        x_min, x_max, y_min, y_max,
+        filename=os.path.join(current_dir, 'optimization_result_balls.mp4')
+    )
     # plt.show()
 
 

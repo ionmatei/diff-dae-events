@@ -310,13 +310,13 @@ def create_animation(times, traj_opt, traj_true, x_min, x_max, y_min, y_max, fil
     colors = ['#FF5733', '#33FF57', '#3357FF'] 
     
     for i in range(n_balls):
-        ball, = ax.plot([], [], 'o', color=colors[i], markersize=12, markeredgecolor='k', label=f'Optimized Ball {i+1}')
+        ball, = ax.plot([], [], 'o', color=colors[i], markersize=28, markeredgecolor='k', label=f'Optimized Ball {i+1}')
         trail, = ax.plot([], [], '-', color=colors[i], alpha=0.5, linewidth=1.5)
         balls.append(ball)
         trails.append(trail)
 
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
+    ax.set_xlim(x_min-1, x_max+1)
+    ax.set_ylim(y_min-1, y_max+1)
     ax.set_aspect('equal')
     ax.grid(True, alpha=0.3)
     ax.set_xlabel('X Position')
@@ -378,6 +378,7 @@ def run_bouncing_balls_test(config: dict):
     solver_cfg = config['dae_solver']
     opt_cfg = config['optimizer']
     algo_cfg = opt_cfg.get('algorithm', {})
+    generate_animation = config.get('generate_animation', False)
 
     # Load DAE specification for true parameter values
     json_path = solver_cfg['dae_specification_file']
@@ -658,11 +659,12 @@ def run_bouncing_balls_test(config: dict):
         plt.savefig(output_path, dpi=150)
         print(f"\n  Plot saved to: {output_path}")
         
-        # Create Animation
-        print("\n  Generating animation...")
-        create_animation(
-            times_opt_np, traj_opt_np, traj_true_np,
-            x_min, x_max, y_min, y_max,
+        if generate_animation:
+            # Create Animation
+            print("\n  Generating animation...")
+            create_animation(
+                times_opt_np, traj_opt_np, traj_true_np,
+                x_min, x_max, y_min, y_max,
             filename='bouncing_balls_validation.mp4'
         )
 

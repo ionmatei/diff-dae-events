@@ -54,11 +54,14 @@ class BouncingBallModel(nn.Module):
         return dh, dv
 
     def event_fn(self, t, state):
-        """Event function: triggers when h crosses zero from above."""
+        """
+        Event function: triggers when h crosses zero from above.
+        Returns tensor to match general pattern.
+        """
         h, v = state
-        return h
+        return torch.stack([h])  # Return as 1-element tensor
 
-    def state_update(self, state):
+    def state_update(self, state, event_idx=0):
         """State update at event: v_new = -e * v_old"""
         h, v = state
         # Small epsilon to avoid immediate re-trigger
@@ -73,108 +76,276 @@ class BouncingBallModel(nn.Module):
         v0 = torch.tensor([self.v0], dtype=torch.float64)
         return t0, (h0, v0)
 
+    def _bisect_event(self, current_state, t_start, t_hi, ev_idx=0, n_bisect=50):
+        """
+        Bisection fallback when odeint_event fails.
+        Finds the time when event ev_idx crosses zero in [t_start, t_hi].
+        """
+        t_start_val = float(t_start)
+        t_lo_val = t_start_val
+        t_hi_val = float(t_hi)
+
+        for _ in range(n_bisect):
+            t_mid = (t_lo_val + t_hi_val) / 2.0
+            tt = torch.tensor([t_start_val, t_mid], dtype=torch.float64)
+            
+            # Pack state for odeint
+            y0 = current_state
+            sol = odeint(self, y0, tt, atol=1e-8, rtol=1e-8)
+            
+            # Evaluate event
+            state_mid = (sol[0][-1], sol[1][-1])
+            ev_val = self.event_fn(tt[1], state_mid)[ev_idx]
+
+            if ev_val.item() > 0:
+                t_lo_val = t_mid
+            else:
+                t_hi_val = t_mid
+
+            if (t_hi_val - t_lo_val) < 1e-10:
+                break
+
+        # Final integration
+        event_t = torch.tensor([t_hi_val], dtype=torch.float64)
+        tt_final = torch.tensor([t_start_val, t_hi_val], dtype=torch.float64)
+        sol_final = odeint(self, current_state, tt_final, atol=1e-8, rtol=1e-8)
+        state_final = (sol_final[0][-1], sol_final[1][-1])
+        return event_t, state_final
+
+    def _find_next_event(self, current_state, current_t, t_end):
+        """
+        Find the next event using probe + odeint_event/bisection.
+        ADAPTED from bouncing_balls.py for scalar/single event model.
+        """
+        current_t_val = current_t.detach().item() if hasattr(current_t, 'detach') else float(current_t)
+        if current_t_val >= t_end:
+            return None, None, None
+
+        # Step 1: Probe integration
+        n_probe = 30
+        tt_probe = torch.linspace(current_t_val, t_end, n_probe, dtype=torch.float64)
+        with torch.no_grad():
+             sol_probe = odeint(self, current_state, tt_probe, atol=1e-6, rtol=1e-6)
+             # sol_probe is tuple (h, v), each (N, 1)
+
+        # Check for zero crossing
+        candidates = [] # (t_lo, t_hi)
+        
+        # event_fn returns [h]
+        # evaluating manually along probe
+        h_vals = sol_probe[0]
+        
+        for i in range(1, n_probe):
+            h_prev = h_vals[i-1]
+            h_curr = h_vals[i]
+            # Event: h > 0 -> h <= 0
+            if h_prev > 0 and h_curr <= 0:
+                candidates.append((tt_probe[i-1].item(), tt_probe[i].item()))
+        
+        if not candidates:
+            return None, None, None
+            
+        # For this simple model, only one event type (0)
+        # Process first candidate
+        t_lo, t_hi = candidates[0]
+        ev_idx = 0
+        
+        try:
+            # Try odeint_event
+            def single_event_fn(t, s):
+                h, v = s
+                return h # Scalar for odeint_event
+                
+            event_t, solution = odeint_event(
+                self,
+                current_state,
+                current_t,
+                event_fn=single_event_fn,
+                reverse_time=False,
+                atol=1e-8,
+                rtol=1e-8
+            )
+            
+            # solution is list of tensors, select last
+            state_at_event = (solution[0][-1], solution[1][-1])
+            return event_t, ev_idx, state_at_event
+            
+        except Exception:
+            # Fallback to bisection
+            try:
+                event_t, state_at_event = self._bisect_event(
+                    current_state, current_t_val, t_hi, ev_idx
+                )
+                return event_t, ev_idx, state_at_event
+            except:
+                return None, None, None
+
+    def simulate_at_targets(self, target_times: torch.Tensor):
+        """
+        Simulate and evaluate at specific target times (differentiable).
+        Right-continuous at events.
+        """
+        target_np = target_times.detach().numpy()
+        if len(target_np) == 0:
+             return torch.zeros((0, 2), dtype=torch.float64)
+             
+        t_end = float(target_np[-1]) + 1e-6
+        n_targets = len(target_np)
+        eps = 1e-9
+
+        # Step 1: Detect events
+        t0, state0 = self.get_initial_state()
+        current_t = t0
+        current_state = state0
+        events = [] # (event_t, event_idx)
+        
+        for _ in range(20):
+            event_t, event_idx, state_at_event = self._find_next_event(
+                current_state, current_t, t_end
+            )
+            if event_t is None:
+                break
+            events.append((event_t, event_idx))
+            current_state = self.state_update(state_at_event, event_idx)
+            current_t = event_t
+
+        # Step 2: Partition targets
+        event_vals = [et.detach().item() for et, _ in events]
+        seg_targets = [[] for _ in range(len(events) + 1)]
+        ptr = 0
+        for seg_idx, et_val in enumerate(event_vals):
+            while ptr < n_targets and target_np[ptr] < et_val - eps:
+                seg_targets[seg_idx].append(ptr)
+                ptr += 1
+        while ptr < n_targets:
+            seg_targets[len(events)].append(ptr)
+            ptr += 1
+
+        # Step 3: Evaluate per segment
+        current_t = t0
+        current_state = state0
+        indexed_results = [] # (idx, state_tensor_2d)
+        
+        for seg_idx in range(len(events) + 1):
+            ct_val = current_t.detach().item()
+            targets = seg_targets[seg_idx]
+            
+            at_start = []
+            after_start = []
+            for tidx in targets:
+                if target_np[tidx] <= ct_val + eps:
+                    at_start.append(tidx)
+                else:
+                    after_start.append(tidx)
+            
+            # At start (or immediately post-event)
+            # pack current_state to tensor
+            cs_tensor = torch.cat([current_state[0], current_state[1]])
+            for tidx in at_start:
+                indexed_results.append((tidx, cs_tensor))
+                
+            if seg_idx < len(events):
+                event_t, event_idx = events[seg_idx]
+                
+                # Time grid: [current, targets..., event]
+                tt_list = [current_t.reshape(-1)]
+                for tidx in after_start:
+                    tt_list.append(torch.tensor([target_np[tidx]], dtype=torch.float64))
+                tt_list.append(event_t.reshape(-1))
+                tt = torch.cat(tt_list)
+                
+                # odeint returns tuple(h, v) each (N, ...)
+                sol = odeint(self, current_state, tt, atol=1e-8, rtol=1e-8)
+                
+                # Interior points (indices 1 to N-2)
+                for i, tidx in enumerate(after_start):
+                    # sol[0][i+1], sol[1][i+1]
+                    s_h = sol[0][i+1]
+                    s_v = sol[1][i+1]
+                    indexed_results.append((tidx, torch.cat([s_h, s_v])))
+                    
+                # Update
+                state_end = (sol[0][-1], sol[1][-1])
+                current_state = self.state_update(state_end, event_idx)
+                current_t = event_t
+                
+            else:
+                # Last segment
+                if after_start:
+                    tt_list = [current_t.reshape(-1)]
+                    for tidx in after_start:
+                        tt_list.append(torch.tensor([target_np[tidx]], dtype=torch.float64))
+                    tt = torch.cat(tt_list)
+                    
+                    sol = odeint(self, current_state, tt, atol=1e-8, rtol=1e-8)
+                    for i, tidx in enumerate(after_start):
+                        s_h = sol[0][i+1]
+                        s_v = sol[1][i+1]
+                        indexed_results.append((tidx, torch.cat([s_h, s_v])))
+
+        indexed_results.sort(key=lambda x: x[0])
+        if not indexed_results:
+             return torch.zeros((0, 2), dtype=torch.float64)
+             
+        # Stack
+        return torch.stack([s for _, s in indexed_results])    
+
     def simulate(self, t_end: float, nbounces: int = 10):
         """
-        Simulate the bouncing ball with events.
-
-        Args:
-            t_end: End time for simulation
-            nbounces: Maximum number of bounces to simulate
-
-        Returns:
-            times: Tensor of time points
-            trajectory_h: Height trajectory
-            trajectory_v: Velocity trajectory
-            event_times: List of event (bounce) times
+        Simulate for visualization (backward compatible output format).
         """
+        # We can implement a simple version or keep logic similar to old one 
+        # but using the new _find_next_event for consistency.
+        
         t0, state = self.get_initial_state()
-
+        current_t = t0
+        current_state = state
+        
         all_times = [t0.reshape(-1)]
         all_h = [state[0].reshape(-1)]
         all_v = [state[1].reshape(-1)]
         event_times = []
-
-        current_t = t0
-
+        
         for i in range(nbounces):
             if float(current_t) >= t_end:
-                break
+                 break
+                 
+            event_t, event_idx, state_at_event = self._find_next_event(
+                current_state, current_t, t_end
+            )
+            
+            sim_until = event_t if event_t is not None else torch.tensor([t_end], dtype=torch.float64)
+            sim_until_val = sim_until.detach().item()
+            current_t_val = current_t.detach().item()
 
-            try:
-                event_t, solution = odeint_event(
-                    self,
-                    state,
-                    current_t,
-                    event_fn=self.event_fn,
-                    reverse_time=False,
-                    atol=1e-8,
-                    rtol=1e-8,
-                )
-
-                # Check if event occurred before t_end
-                if event_t.detach().item() > t_end:
-                    # Integrate to t_end instead
-                    tt = torch.linspace(float(current_t), t_end, self.ncp, dtype=torch.float64)
-                    if len(tt) > 1:
-                        sol = odeint(self, state, tt, method='midpoint')
-                        all_times.append(tt[1:])
-                        all_h.append(sol[0][1:].reshape(-1))
-                        all_v.append(sol[1][1:].reshape(-1))
-                    break
-
-                event_times.append(event_t)
-
-                # Dense output between current_t and event_t
-                event_t_val = event_t.detach().item()
-                current_t_val = current_t.detach().item() if hasattr(current_t, 'detach') else float(current_t)
-                tt = torch.linspace(current_t_val, event_t_val, self.ncp, dtype=torch.float64)
-
-                if len(tt) > 1:
-                    sol = odeint(self, state, tt, atol=1e-4, rtol=1e-4, 
-                    method='midpoint'
-                    )
-                    all_times.append(tt[1:])
-                    all_h.append(sol[0][1:].reshape(-1))
-                    all_v.append(sol[1][1:].reshape(-1))
-
-                # Update state at event
-                state = self.state_update(tuple(s[-1] for s in solution))
-                current_t = event_t
-
-            except Exception as ex:
-                # No more events, integrate to end
-                current_t_val = current_t.detach().item() if hasattr(current_t, 'detach') else float(current_t)
-                if current_t_val < t_end:
-                    tt = torch.linspace(float(current_t), t_end, self.ncp, dtype=torch.float64)
-                    if len(tt) > 1:
-                        sol = odeint(self, state, tt, atol=1e-4, rtol=1e-4, method='midpoint')
-                        all_times.append(tt[1:])
-                        all_h.append(sol[0][1:].reshape(-1))
-                        all_v.append(sol[1][1:].reshape(-1))
-                break
-
-        # Final segment if needed
-        current_t_val = current_t.detach().item() if hasattr(current_t, 'detach') else float(current_t)
-        if current_t_val < t_end and len(event_times) > 0:
-            tt = torch.linspace(float(current_t), t_end, self.ncp, dtype=torch.float64)
+            # Dense integration
+            n_pts = max(3, int((sim_until_val - current_t_val) * 100)) # e.g. 100 Hz
+            tt = torch.linspace(current_t_val, sim_until_val, n_pts, dtype=torch.float64)
             if len(tt) > 1:
-                sol = odeint(self, state, tt, method='midpoint')
+                sol = odeint(self, current_state, tt, atol=1e-5, rtol=1e-5)
+                # Skip first point to avoid duplicate
                 all_times.append(tt[1:])
                 all_h.append(sol[0][1:].reshape(-1))
                 all_v.append(sol[1][1:].reshape(-1))
-
+            
+            if event_t is None:
+                break
+                
+            event_times.append(event_t)
+            current_state = self.state_update(state_at_event, event_idx)
+            current_t = event_t
+            
         times = torch.cat(all_times)
         trajectory_h = torch.cat(all_h)
         trajectory_v = torch.cat(all_v)
-
+        
         return times, trajectory_h, trajectory_v, event_times
 
 
 class DAEOptimizerPyTorch:
     """
     PyTorch-based optimizer for DAEs with events.
-
-    Uses forward simulation with autograd to compute gradients.
+    Now uses simulate_at_targets for correct gradient propagation.
     """
 
     def __init__(
@@ -184,129 +355,29 @@ class DAEOptimizerPyTorch:
         verbose: bool = True,
         nbounces: int = 10
     ):
-        """
-        Args:
-            model: PyTorch model with simulate() method
-            optimize_params: List of parameter names to optimize
-            verbose: Print progress
-            nbounces: Maximum number of event segments
-        """
         self.model = model
         self.optimize_params = optimize_params
         self.verbose = verbose
-        self.nbounces = nbounces
+        self.nbounces = nbounces # Unused in new logic but kept for compat
 
-        # Get optimizable parameters
         self.param_dict = {name: param for name, param in model.named_parameters()}
         self.opt_params = [self.param_dict[name] for name in optimize_params]
-
-    def predict_outputs(self, t_end: float, target_times: np.ndarray) -> np.ndarray:
-        """
-        Predict outputs at target times.
-
-        Args:
-            t_end: End time for simulation
-            target_times: Times at which to evaluate outputs
-
-        Returns:
-            Predicted outputs (height values) at target times
-        """
-        with torch.no_grad():
-            times, h_traj, v_traj, _ = self.model.simulate(t_end, self.nbounces)
-
-            # Interpolate to target times
-            times_np = times.numpy()
-            h_np = h_traj.numpy()
-
-            h_interp = np.interp(target_times, times_np, h_np)
-
-        return h_interp
 
     def _compute_loss(self, t_end: float, target_times: torch.Tensor,
                       target_outputs: torch.Tensor) -> torch.Tensor:
         """
-        Compute loss by simulating and comparing to targets.
+        Compute loss by simulating directly at target times using simulate_at_targets.
         """
-        times, h_traj, v_traj, _ = self.model.simulate(t_end, self.nbounces)
-
-        # Interpolate predictions to target times
-        # Use differentiable interpolation
-        y_pred = self._differentiable_interp(times, h_traj, target_times)
-
+        # Get states at target times [N, 2] (h, v)
+        y_pred = self.model.simulate_at_targets(target_times)
+        
+        # Assume target_outputs contains only height (N,)
+        # y_pred columns: 0->h, 1->v
+        h_pred = y_pred[:, 0]
+        
         # MSE loss
-        loss = torch.mean((y_pred - target_outputs) ** 2)
+        loss = torch.mean((h_pred - target_outputs) ** 2)
         return loss
-
-    def _differentiable_interp(self, x: torch.Tensor, y: torch.Tensor,
-                                x_new: torch.Tensor) -> torch.Tensor:
-        """
-        Differentiable linear interpolation.
-        """
-        # Sort if needed (should already be sorted)
-        sorted_indices = torch.argsort(x)
-        x_sorted = x[sorted_indices]
-        y_sorted = y[sorted_indices]
-
-        # Find indices for interpolation
-        indices = torch.searchsorted(x_sorted, x_new, right=True) - 1
-        indices = torch.clamp(indices, 0, len(x_sorted) - 2)
-
-        # Linear interpolation
-        x0 = x_sorted[indices]
-        x1 = x_sorted[indices + 1]
-        y0 = y_sorted[indices]
-        y1 = y_sorted[indices + 1]
-
-        # Avoid division by zero
-        dx = x1 - x0
-        dx = torch.where(dx.abs() < 1e-12, torch.ones_like(dx) * 1e-12, dx)
-
-        t = (x_new - x0) / dx
-        t = torch.clamp(t, 0.0, 1.0)
-
-        return y0 + t * (y1 - y0)
-
-    def optimization_step(
-        self,
-        t_span: Tuple[float, float],
-        target_times: np.ndarray,
-        target_outputs: np.ndarray
-    ) -> Tuple[float, np.ndarray]:
-        """
-        Single optimization step: forward pass + gradient computation.
-
-        Returns:
-            loss: Scalar loss value
-            grad: Gradient w.r.t. optimized parameters
-        """
-        t_end = t_span[1]
-
-        # Convert to tensors
-        target_times_t = torch.tensor(target_times, dtype=torch.float64)
-        target_outputs_t = torch.tensor(target_outputs, dtype=torch.float64)
-
-        # Zero gradients
-        for param in self.opt_params:
-            if param.grad is not None:
-                param.grad.zero_()
-
-        # Forward pass and loss
-        loss = self._compute_loss(t_end, target_times_t, target_outputs_t)
-
-        # Backward pass
-        loss.backward()
-
-        # Extract gradients
-        grads = []
-        for param in self.opt_params:
-            if param.grad is not None:
-                grads.append(param.grad.detach().numpy().flatten())
-            else:
-                grads.append(np.zeros(param.shape).flatten())
-
-        grad = np.concatenate(grads)
-
-        return float(loss.detach()), grad
 
     def optimize(
         self,
@@ -322,26 +393,6 @@ class DAEOptimizerPyTorch:
         beta2: float = 0.999,
         epsilon: float = 1e-8
     ) -> Dict:
-        """
-        Run optimization loop.
-
-        Args:
-            t_span: (t_start, t_end)
-            target_times: Target measurement times
-            target_outputs: Target values at those times
-            max_iterations: Max iterations
-            step_size: Learning rate
-            tol: Gradient norm tolerance
-            print_every: Print interval
-            algorithm: 'sgd' or 'adam'
-            beta1: Adam beta1 parameter (default 0.9)
-            beta2: Adam beta2 parameter (default 0.999)
-            epsilon: Adam epsilon parameter (default 1e-8)
-
-        Returns:
-            Dictionary with results
-        """
-        # Setup optimizer with explicit parameters to match JAX implementation
         if algorithm.lower() == 'adam':
             optimizer = torch.optim.Adam(
                 self.opt_params, lr=step_size, betas=(beta1, beta2), eps=epsilon
@@ -351,7 +402,6 @@ class DAEOptimizerPyTorch:
 
         history = {'loss': [], 'gradient_norm': [], 'params': []}
 
-        # Get initial param values
         p_init = np.concatenate([p.detach().numpy().flatten() for p in self.opt_params])
 
         if self.verbose:
@@ -366,31 +416,23 @@ class DAEOptimizerPyTorch:
         start_time = time.time()
         converged = False
 
-        # Convert targets to tensors (once)
         target_times_t = torch.tensor(target_times, dtype=torch.float64)
         target_outputs_t = torch.tensor(target_outputs, dtype=torch.float64)
         t_end = t_span[1]
 
         for it in range(max_iterations):
             iter_start = time.time()
-
-            # Zero gradients
             optimizer.zero_grad()
-
-            # Forward pass
+            
             loss = self._compute_loss(t_end, target_times_t, target_outputs_t)
-
-            # Backward pass
             loss.backward()
 
-            # Get gradient norm
             grad_norm = 0.0
             for param in self.opt_params:
                 if param.grad is not None:
                     grad_norm += float(torch.sum(param.grad ** 2))
             grad_norm = np.sqrt(grad_norm)
 
-            # Record history
             loss_val = float(loss.detach())
             history['loss'].append(loss_val)
             history['gradient_norm'].append(grad_norm)
@@ -400,32 +442,26 @@ class DAEOptimizerPyTorch:
 
             iter_time = time.time() - iter_start
 
-            if it % print_every == 0 or it == max_iterations - 1:
+            if it % print_every == 0 or it == 0 or it == max_iterations - 1:
                 param_str = ", ".join([f"{name}={p.item():.6f}"
                                        for name, p in zip(self.optimize_params, self.opt_params)])
                 print(f"  Iter {it:4d}: Loss = {loss_val:.6e}, |grad| = {grad_norm:.6e}, "
-                      f"t_iter = {iter_time:.3f}s, {param_str}")
+                      f"t_iter = {1000*iter_time:.3f}ms, {param_str}")
 
             if grad_norm < tol:
                 print(f"\nConverged at iteration {it}")
                 converged = True
                 break
 
-            # Update parameters
             optimizer.step()
 
-            # Clamp parameters to valid ranges
             with torch.no_grad():
-                # Ensure e is in (0, 1) for physical restitution
                 if hasattr(self.model, 'e'):
-                    self.model.e.data.clamp_(0.01, 0.99)
-                # Ensure g is positive
+                    self.model.e.data.clamp_(0.01, 2.0)
                 if hasattr(self.model, 'g'):
                     self.model.g.data.clamp_(0.1, 100.0)
 
         elapsed = time.time() - start_time
-
-        # Final parameters
         p_final = np.concatenate([p.detach().numpy().flatten() for p in self.opt_params])
 
         if self.verbose:

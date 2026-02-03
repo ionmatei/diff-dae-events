@@ -33,5 +33,6 @@ optimizer:
   max_targets: 1200 # 1.2 * ncp
   device: cpu
   gpu_memory_fraction: 0.9
+generate_animation: true
 
 
