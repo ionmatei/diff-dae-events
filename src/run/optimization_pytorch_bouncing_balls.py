@@ -443,7 +443,7 @@ def run_bouncing_balls_test(config: dict):
     print("-" * 40)
 
     # Perturb parameters
-    g_init = g_true * 1.0  # Keep g fixed
+    g_init = g_true + 1.0  # Keep g fixed
     e_g_init = e_g_true + 0.1  # Bias e_g
     e_b_init = e_b_true + 0.1  # Bias e_b
 

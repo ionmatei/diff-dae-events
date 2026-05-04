@@ -1,0 +1,409 @@
+"""
+JAX/diffrax baseline optimization for the N-ball bouncing-balls DAE.
+
+Mirror of `src/run/optimization_pytorch_bouncing_balls_N.py` but using the
+JAX/diffrax model in `src.jax_baseline.bouncing_balls_n_jax`. Same ground
+truth (DAESolver / IDA), same biased initial guess, same Adam loop, same
+loss (MSE on positions), same return-dict shape — so this drops into
+`src/benchmark/benchmark_jax_vs_pytorch_N.py` next to the PyTorch path.
+
+The point of the file is to give the AD-through-simulation baseline a
+JAX/JIT implementation (using diffrax for ODE integration + events with
+implicit-diff for event times), making the comparison against the
+discrete-adjoint JAX path apples-to-apples on framework.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+import argparse
+
+import numpy as np
+import yaml
+
+import jax
+import jax.numpy as jnp
+from jax import config as jax_config
+
+jax_config.update("jax_enable_x64", True)
+# Default to CPU unless the caller set JAX_PLATFORMS (e.g. "cuda" /
+# "gpu"). The benchmark wrapper opts into GPU via the env var.
+if not os.environ.get("JAX_PLATFORMS"):
+    jax_config.update("jax_platform_name", "cpu")
+
+# Path setup
+current_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(os.path.dirname(current_dir))
+sys.path.append(root_dir)
+sys.path.append(os.path.join(root_dir, 'src'))
+
+from src.jax_baseline.bouncing_balls_n_jax import (  # noqa: E402
+    BouncingBallsNModelJAX, BouncingBallsParams,
+)
+from src.discrete_adjoint.dae_solver import DAESolver  # noqa: E402
+
+
+def load_config(config_path: str) -> dict:
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def load_dae_spec(spec_path: str) -> dict:
+    with open(spec_path, 'r') as f:
+        return yaml.safe_load(f)  # YAML accepts JSON
+
+
+def count_balls(dae_data: dict) -> int:
+    state_names = [s['name'] for s in dae_data['states']]
+    n = sum(1 for s in state_names if s.startswith('x') and s[1:].isdigit())
+    if 4 * n != len(state_names):
+        raise ValueError(
+            f"Spec layout mismatch: counted {n} balls but {len(state_names)} states."
+        )
+    return n
+
+
+def position_indices(dae_data: dict, n_balls: int):
+    state_names = [s['name'] for s in dae_data['states']]
+    pos_idx = []
+    for i in range(1, n_balls + 1):
+        pos_idx.append(state_names.index(f'x{i}'))
+        pos_idx.append(state_names.index(f'y{i}'))
+    return pos_idx
+
+
+def prepare_loss_targets(sol):
+    all_t, all_x = [], []
+    for seg in sol.segments:
+        if len(seg.t) > 0:
+            all_t.append(seg.t)
+            all_x.append(seg.x)
+    if not all_t:
+        return np.array([]), np.array([])
+    target_times = np.concatenate([np.array(t[:-1]) for t in all_t])
+    target_data = np.concatenate([np.array(x[:-1]) for x in all_x])
+    return target_times, target_data
+
+
+def run_bouncing_balls_test(config: dict, config_dir: str):
+    print("=" * 80)
+    print("Bouncing Balls (N balls) - JAX/diffrax Baseline Optimizer Test")
+    print("=" * 80)
+    # Confirm the JAX device used by this run — important for fair
+    # head-to-head timing against the PyTorch baseline (also CPU).
+    print(f"  JAX backend: {jax.default_backend()}  devices: {jax.devices()}")
+
+    solver_cfg = config['dae_solver']
+    opt_cfg = config['optimizer']
+    algo_cfg = opt_cfg.get('algorithm', {})
+
+    spec_path = solver_cfg['dae_specification_file']
+    if not os.path.isabs(spec_path):
+        spec_path = os.path.join(root_dir, spec_path)
+    dae_data = load_dae_spec(spec_path)
+
+    n_balls = count_balls(dae_data)
+    pos_idx = position_indices(dae_data, n_balls)
+    state_names = [s['name'] for s in dae_data['states']]
+
+    print(f"\nLoaded DAE from: {spec_path}")
+    print(f"  Detected N = {n_balls} balls, {len(state_names)} states.")
+
+    p_true = {p['name']: p['value'] for p in dae_data['parameters']}
+    g_true = float(p_true['g'])
+    e_g_true = float(p_true['e_g'])
+    e_b_true = float(p_true['e_b'])
+    d_sq_true = float(p_true['d_sq'])
+    x_min = float(p_true['x_min']); x_max = float(p_true['x_max'])
+    y_min = float(p_true['y_min']); y_max = float(p_true['y_max'])
+    initial_state = [float(s['start']) for s in dae_data['states']]
+
+    print(f"\nTrue parameters: g={g_true}, e_g={e_g_true}, e_b={e_b_true}")
+    print(f"Box: x=[{x_min},{x_max}], y=[{y_min},{y_max}], d_sq={d_sq_true}")
+
+    # ---------------------------------------------------------------------
+    # Step 1: ground truth via DAESolver (compiled fast path)
+    # ---------------------------------------------------------------------
+    print("\n" + "-" * 40)
+    print("Step 1: Generate Reference Trajectory (DAESolver)")
+    print("-" * 40)
+
+    t_span = (solver_cfg['start_time'], solver_cfg['stop_time'])
+    ncp = solver_cfg.get('ncp', 600)
+
+    true_p_list = [p['value'] for p in dae_data['parameters']]
+    solver = DAESolver(dae_data, verbose=False, use_compiled_residual=True)
+    solver.update_parameters(true_p_list)
+    sol_true = solver.solve_augmented(t_span, ncp=ncp)
+    t_target, y_target = prepare_loss_targets(sol_true)
+    print(f"  Number of segments: {len(sol_true.segments)}")
+    print(f"  Target data points: {len(t_target)}")
+
+    # ---------------------------------------------------------------------
+    # Step 2: biased initial guess (same biases as the PyTorch baseline)
+    # ---------------------------------------------------------------------
+    print("\n" + "-" * 40)
+    print("Step 2: Create Perturbed Initial Guess")
+    print("-" * 40)
+
+    g_init = g_true - 1.0
+    e_g_init = e_g_true + 0.1
+    e_b_init = e_b_true + 0.1
+
+    optimize_params = list(opt_cfg['opt_params'])
+    init_lookup = {'g': g_init, 'e_g': e_g_init, 'e_b': e_b_init}
+    for p_name in ('g', 'e_g', 'e_b'):
+        val_true = p_true[p_name]
+        val_init = init_lookup[p_name]
+        is_opt = p_name in optimize_params
+        status = "OPTIMIZED" if is_opt else "FIXED"
+        diff = val_init - val_true
+        print(f"  {p_name}: True={val_true:.4f}, Init={val_init:.4f} (diff={diff:+.4f}) -> {status}")
+
+    # ---------------------------------------------------------------------
+    # Step 3: build model + run Adam via jax.grad
+    # ---------------------------------------------------------------------
+    print("\n" + "-" * 40)
+    print("Step 3: Run Optimization")
+    print("-" * 40)
+
+    # Padding budgets: keep diffrax JIT cache stable across iterations.
+    # The total trajectory length is ncp (matches the PyTorch / discrete-
+    # adjoint reference). Per-segment counts are NOT uniform — segments
+    # vary in duration so the longest segment can hold a large fraction
+    # of all ncp targets. We size the per-segment SaveAt buffer to the
+    # max per-segment count observed in the ground-truth trajectory,
+    # times a safety factor so topology shifts during optimization don't
+    # overflow the buffer. (If a segment ever exceeds this bound, the
+    # model raises a clear error pointing back here.)
+    # max_segments: at least the truth's segment count + safety margin.
+    # The user's config value may be tuned for the optimizer's perturbed-
+    # param topology, which has fewer segments than truth — but the
+    # forward sim must accommodate the true trajectory or it silently
+    # truncates events and drifts.
+    truth_n_segments = len(sol_true.segments)
+    cfg_max_segments = max(
+        int(opt_cfg.get('max_segments', 50)),
+        truth_n_segments + 4,
+    )
+    truth_per_seg = [
+        max(len(seg.t) - 1, 0) for seg in sol_true.segments if len(seg.t) > 0
+    ]
+    truth_max_per_seg = max(truth_per_seg) if truth_per_seg else ncp
+    PER_SEG_SAFETY = 3
+    max_pts_per_seg = max(truth_max_per_seg * PER_SEG_SAFETY, 64)
+
+    model = BouncingBallsNModelJAX(
+        N=n_balls,
+        g=g_init, e_g=e_g_init, e_b=e_b_init, d_sq=d_sq_true,
+        x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
+        initial_state=initial_state,
+        max_segments=cfg_max_segments,
+        max_pts_per_seg=max_pts_per_seg,
+    )
+
+    max_events = max(cfg_max_segments * 2, 64)
+
+    # Loss = MSE on position states, mirrors PyTorch's `_compute_loss`
+    pos_idx_jnp = jnp.asarray(pos_idx, dtype=jnp.int32)
+    target_times_jnp = jnp.asarray(t_target, dtype=jnp.float64)
+    target_data_jnp = jnp.asarray(y_target, dtype=jnp.float64)
+
+    def loss_fn(params):
+        y_pred = model.simulate_at_targets(
+            params, target_times_jnp, max_events=max_events
+        )
+        return jnp.mean(
+            (y_pred[:, pos_idx_jnp] - target_data_jnp[:, pos_idx_jnp]) ** 2
+        )
+
+    value_and_grad = jax.value_and_grad(loss_fn)
+
+    algo_params = algo_cfg.get('params', {})
+    step_size = float(algo_params.get('step_size', 0.001))
+    beta1 = float(algo_params.get('beta1', 0.9))
+    beta2 = float(algo_params.get('beta2', 0.999))
+    epsilon = float(algo_params.get('epsilon', 1e-8))
+    max_iter = int(opt_cfg['max_iterations'])
+    tol = float(opt_cfg['tol'])
+    print_every = int(opt_cfg.get('print_every', 10))
+    algorithm_type = algo_cfg.get('type', 'adam').lower()
+
+    if algorithm_type != 'adam':
+        print(f"  WARNING: algorithm={algorithm_type!r} not implemented; using Adam.")
+
+    # Adam state
+    params = BouncingBallsParams(
+        g=jnp.asarray(g_init, dtype=jnp.float64),
+        e_g=jnp.asarray(e_g_init, dtype=jnp.float64),
+        e_b=jnp.asarray(e_b_init, dtype=jnp.float64),
+    )
+
+    # Mask for which params are optimized — matches the PyTorch path.
+    opt_mask = {
+        'g': 'g' in optimize_params,
+        'e_g': 'e_g' in optimize_params,
+        'e_b': 'e_b' in optimize_params,
+    }
+
+    @jax.jit
+    def adam_step(p, m, v, grads, t_step):
+        def upd(pi, mi, vi, gi, mask):
+            mi_new = beta1 * mi + (1.0 - beta1) * gi
+            vi_new = beta2 * vi + (1.0 - beta2) * gi * gi
+            bc1 = 1.0 - beta1 ** t_step
+            bc2 = 1.0 - beta2 ** t_step
+            step = step_size * (mi_new / bc1) / (jnp.sqrt(vi_new / bc2) + epsilon)
+            pi_new = jnp.where(mask, pi - step, pi)
+            return pi_new, mi_new, vi_new
+
+        g_new, m_g, v_g = upd(p.g, m.g, v.g, grads.g, opt_mask['g'])
+        eg_new, m_eg, v_eg = upd(p.e_g, m.e_g, v.e_g, grads.e_g, opt_mask['e_g'])
+        eb_new, m_eb, v_eb = upd(p.e_b, m.e_b, v.e_b, grads.e_b, opt_mask['e_b'])
+
+        # Match PyTorch path: clamp e_g, e_b to [0.001, 5], g to [0.001, 100].
+        g_new = jnp.clip(g_new, 0.001, 100.0)
+        eg_new = jnp.clip(eg_new, 0.001, 5.0)
+        eb_new = jnp.clip(eb_new, 0.001, 5.0)
+
+        return (
+            BouncingBallsParams(g=g_new, e_g=eg_new, e_b=eb_new),
+            BouncingBallsParams(g=m_g, e_g=m_eg, e_b=m_eb),
+            BouncingBallsParams(g=v_g, e_g=v_eg, e_b=v_eb),
+        )
+
+    # Initial Adam moments
+    zero = jnp.zeros((), dtype=jnp.float64)
+    m_state = BouncingBallsParams(g=zero, e_g=zero, e_b=zero)
+    v_state = BouncingBallsParams(g=zero, e_g=zero, e_b=zero)
+
+    history_loss = []
+    history_grad = []
+    history_p = []
+    iter_times = []
+    converged = False
+
+    p_init_str = {k: float(getattr(params, k)) for k in ('g', 'e_g', 'e_b')}
+    print(f"\nStarting JAX baseline optimization (Adam)")
+    print(f"  Max iter={max_iter}, lr={step_size}")
+    print(f"  Initial params: {p_init_str}")
+    print()
+
+    for it in range(1, max_iter + 1):
+        iter_start = time.perf_counter()
+
+        loss_val, grads = value_and_grad(params)
+        # block to get correct iter time
+        loss_val.block_until_ready()
+
+        grad_norm_sq = sum(
+            float(getattr(grads, k) ** 2)
+            for k in ('g', 'e_g', 'e_b') if opt_mask[k]
+        )
+        grad_norm = float(np.sqrt(grad_norm_sq))
+
+        # Snapshot pre-update params (matches the PyTorch baseline)
+        p_pre = np.array(
+            [float(getattr(params, k)) for k in optimize_params],
+            dtype=np.float64,
+        )
+        history_loss.append(float(loss_val))
+        history_grad.append(grad_norm)
+        history_p.append(p_pre)
+
+        params, m_state, v_state = adam_step(params, m_state, v_state, grads, it)
+
+        iter_ms = (time.perf_counter() - iter_start) * 1000.0
+        iter_times.append(iter_ms)
+
+        if it % print_every == 0 or it == 1:
+            param_str = " ".join([f"{float(getattr(params, k)):.4f}" for k in optimize_params])
+            print(f"  Iter {it:4d} | loss={float(loss_val):.6e} | |grad|={grad_norm:.6e} | "
+                  f"p=[{param_str}] | {iter_ms:.1f} ms")
+
+        if grad_norm < tol and it > 1:
+            print(f"\nConverged at iteration {it}")
+            converged = True
+            break
+
+    n_iter = len(history_loss)
+    avg_iter_time = (
+        sum(iter_times[1:]) / max(1, len(iter_times) - 1)
+        if len(iter_times) > 1 else 0.0
+    )
+
+    p_final = np.array(
+        [float(getattr(params, k)) for k in optimize_params], dtype=np.float64
+    )
+    p_opt_subset = {k: float(p_final[i]) for i, k in enumerate(optimize_params)}
+    p_true_subset = {k: p_true[k] for k in optimize_params}
+
+    print("\n" + "=" * 70)
+    print("Optimization Result")
+    print("=" * 70)
+    print(f"True params:      {p_true_subset}")
+    print(f"Initial params:   {{ {', '.join(f'{k}: {init_lookup[k]:.4f}' for k in optimize_params)} }}")
+    print(f"Optimized params: {p_opt_subset}")
+    print(f"Iterations:       {n_iter}")
+    print(f"Converged:        {converged}")
+    print(f"Final loss:       {history_loss[-1]:.6e}")
+    print(f"Final |grad|:     {history_grad[-1]:.6e}")
+    print(f"Avg iter time:    {avg_iter_time:.2f} ms")
+
+    for name in optimize_params:
+        true_val = p_true[name]
+        opt_val = p_opt_subset[name]
+        err = abs(opt_val - true_val)
+        print(f"  {name}: true={true_val:.4f}  opt={opt_val:.4f}  err={err:.6e}")
+
+    # Validation: re-simulate with the optimized params.
+    print("\n" + "-" * 40)
+    print("Step 5: Validation")
+    print("-" * 40)
+    y_pred = model.simulate_at_targets(
+        params, target_times_jnp, max_events=max_events
+    )
+    y_pred_np = np.asarray(y_pred)
+    val_mse = float(
+        np.mean((y_pred_np[:, pos_idx] - y_target[:, pos_idx]) ** 2)
+    )
+    print(f"Final validation loss (positions only, {len(pos_idx)} entries): {val_mse:.6e}")
+
+    # Prediction-error series matching the existing benchmark consumers.
+    p_true_opt = np.array([p_true[name] for name in optimize_params], dtype=float)
+    prediction_error_history = [
+        float(np.linalg.norm(np.asarray(p_iter, dtype=float) - p_true_opt))
+        for p_iter in history_p
+    ]
+
+    return {
+        'method': 'jax_baseline_diffrax_N',
+        'n_balls': n_balls,
+        'ncp': ncp,
+        'avg_iter_time': avg_iter_time,
+        'p_opt': p_opt_subset,
+        'p_true': p_true_subset,
+        'opt_param_names': list(optimize_params),
+        'final_validation_loss': val_mse,
+        'iterations': n_iter,
+        'converged': converged,
+        'prediction_error_history': prediction_error_history,
+    }
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="N-ball JAX/diffrax baseline optimizer test")
+    parser.add_argument(
+        '--config', '-c',
+        type=str,
+        default=os.path.join('config', 'config_bouncing_balls_N3.yaml'),
+        help='Path to configuration YAML file (relative to project root or absolute).',
+    )
+    args = parser.parse_args()
+    cfg_path = args.config
+    if not os.path.isabs(cfg_path):
+        cfg_path = os.path.join(root_dir, cfg_path)
+    cfg = load_config(cfg_path)
+    run_bouncing_balls_test(cfg, os.path.dirname(cfg_path))

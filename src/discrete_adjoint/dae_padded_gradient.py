@@ -9,7 +9,9 @@ import re
 from functools import partial
 
 class DAEPaddedGradient:
-    def __init__(self, dae_data, max_blocks=50, max_pts=500, max_targets=200, downsample_segments=False, all_segments=False):
+    def __init__(self, dae_data, max_blocks=50, max_pts=500, max_targets=200,
+                 downsample_segments=False, all_segments=False,
+                 warmup_kernels=('total_grad',)):
         """
         Initialize the Padded Gradient Computer.
 
@@ -20,6 +22,13 @@ class DAEPaddedGradient:
             max_targets: Maximum number of target time-points (avoids JIT recompilation)
             downsample_segments: If True, downsample segments exceeding max_pts
             all_segments: If True (and downsample_segments=True), resample ALL segments to max_pts
+            warmup_kernels: Which JIT kernels to compile eagerly during construction.
+                Subset of {'sweep', 'loss_grad', 'total_grad'}. The default
+                ('total_grad',) compiles only the kernel used by `optimize_adam`,
+                which subsumes the work of the other two — compiling all three
+                duplicates XLA effort. Pass () to skip warmup entirely (each
+                kernel will compile lazily on first call). Pass 'all' or
+                ('sweep', 'loss_grad', 'total_grad') for the legacy behavior.
         """
         self.dae_data = dae_data
         self.max_blocks = max_blocks
@@ -27,6 +36,9 @@ class DAEPaddedGradient:
         self.max_targets = max_targets
         self.downsample_segments = downsample_segments
         self.all_segments = all_segments
+        if warmup_kernels == 'all':
+            warmup_kernels = ('sweep', 'loss_grad', 'total_grad')
+        self.warmup_kernels = tuple(warmup_kernels) if warmup_kernels else ()
 
         # Create JAX functions
         self.funcs = self._create_jax_functions(dae_data)
@@ -82,48 +94,66 @@ class DAEPaddedGradient:
         self._warmup()
 
     def _warmup(self):
-        """Perform a dummy call to trigger JIT compilation."""
+        """Trigger JIT compilation for the kernels listed in self.warmup_kernels.
+
+        `optimize_adam` only calls `jit_total_grad`, which already subsumes
+        the value_and_grad and adjoint-sweep computations — so compiling
+        `jit_loss_grad` and `jit_sweep` separately duplicates XLA work.
+        Default: warm up only `jit_total_grad`. Set warmup_kernels='all' or
+        () in the constructor to override.
+        """
+        import time as _time
+
+        if not self.warmup_kernels:
+            print("Compilation deferred (warmup_kernels=()) - first call will compile.")
+            return
+
         n_x, n_z, n_p = self.dims
         n_w = n_x + n_z
-        
-        # Create dummy inputs
+
+        # Dummy inputs (only allocate what's actually needed)
         W_p = jnp.zeros((self.max_blocks, self.max_pts, n_w))
         TS_p = jnp.zeros((self.max_blocks, self.max_pts))
         b_types = jnp.zeros(self.max_blocks, dtype=jnp.int32)
         b_indices = jnp.zeros((self.max_blocks, 2), dtype=jnp.int32)
         b_param = jnp.zeros(self.max_blocks)
-        dL_p = jnp.zeros((self.max_blocks, self.max_pts, n_w))
-        dL_dp = jnp.zeros(n_p)
         p_val = jnp.zeros(n_p)
-        
-        # Dummy Jacobians (n_pts - 1)
-        J_wn = jnp.zeros((self.max_blocks, self.max_pts - 1, n_w, n_w))
-        J_wc = jnp.zeros((self.max_blocks, self.max_pts - 1, n_w, n_w))
-        J_p_jac = jnp.zeros((self.max_blocks, self.max_pts - 1, n_w, n_p))
-        dR_dtc = jnp.zeros((self.max_blocks, self.max_pts - 1, n_w))
-        dR_dtn = jnp.zeros((self.max_blocks, self.max_pts - 1, n_w))
-
-        # Dummy targets (padded to max_targets for stable compilation)
         target_times = jnp.zeros(self.max_targets)
         target_data = jnp.zeros((self.max_targets, n_x))
         n_targets = jnp.int32(10)
 
-        # Helper to simulate compilation without blocking too long
-        _ = self.jit_sweep(
-            W_p, TS_p, p_val,
-            b_types, b_indices, b_param,
-            J_wn, J_wc, J_p_jac, dR_dtc, dR_dtn, dL_p, dL_dp
-        )
+        if 'sweep' in self.warmup_kernels:
+            t0 = _time.perf_counter()
+            dL_p = jnp.zeros((self.max_blocks, self.max_pts, n_w))
+            dL_dp = jnp.zeros(n_p)
+            J_wn = jnp.zeros((self.max_blocks, self.max_pts - 1, n_w, n_w))
+            J_wc = jnp.zeros((self.max_blocks, self.max_pts - 1, n_w, n_w))
+            J_p_jac = jnp.zeros((self.max_blocks, self.max_pts - 1, n_w, n_p))
+            dR_dtc = jnp.zeros((self.max_blocks, self.max_pts - 1, n_w))
+            dR_dtn = jnp.zeros((self.max_blocks, self.max_pts - 1, n_w))
+            _ = self.jit_sweep(
+                W_p, TS_p, p_val,
+                b_types, b_indices, b_param,
+                J_wn, J_wc, J_p_jac, dR_dtc, dR_dtn, dL_p, dL_dp,
+            )
+            print(f"  jit_sweep compiled in {_time.perf_counter() - t0:.2f}s")
 
-        _ = self.jit_loss_grad(
-            W_p, p_val, TS_p, b_types, b_indices, b_param,
-            target_times, target_data, n_targets, 1.0, 150.0, n_x
-        )
+        if 'loss_grad' in self.warmup_kernels:
+            t0 = _time.perf_counter()
+            _ = self.jit_loss_grad(
+                W_p, p_val, TS_p, b_types, b_indices, b_param,
+                target_times, target_data, n_targets, 1.0, 150.0, n_x,
+            )
+            print(f"  jit_loss_grad compiled in {_time.perf_counter() - t0:.2f}s")
 
-        _ = self.jit_total_grad(
-            W_p, TS_p, p_val, b_types, b_indices, b_param,
-            target_times, target_data, n_targets, 1.0, 150.0
-        )
+        if 'total_grad' in self.warmup_kernels:
+            t0 = _time.perf_counter()
+            _ = self.jit_total_grad(
+                W_p, TS_p, p_val, b_types, b_indices, b_param,
+                target_times, target_data, n_targets, 1.0, 150.0,
+            )
+            print(f"  jit_total_grad compiled in {_time.perf_counter() - t0:.2f}s")
+
         print("Compilation complete.")
 
     def _create_jax_functions(self, dae_data):
@@ -214,7 +244,21 @@ class DAEPaddedGradient:
                 
             args = "t, x_post, z_post, x_pre, z_pre, p" if is_reinit else "t, x, z, p"
             code = f"def func({args}): return jnp.array([{', '.join(jax_exprs)}])"
-            local_scope = {'jnp': jnp}
+            # Bare math-function references in spec expressions
+            # (e.g. `tanh(...)`, `exp(...)`) must resolve to jax ops at
+            # eval time. Without this map, a Cauer-style g equation like
+            # `... + tanh(50.0 * (time - t0)) * ...` raises NameError.
+            local_scope = {
+                'jnp': jnp,
+                'exp': jnp.exp, 'log': jnp.log, 'log10': jnp.log10,
+                'sqrt': jnp.sqrt, 'abs': jnp.abs,
+                'sin': jnp.sin, 'cos': jnp.cos, 'tan': jnp.tan,
+                'asin': jnp.arcsin, 'acos': jnp.arccos, 'atan': jnp.arctan,
+                'sinh': jnp.sinh, 'cosh': jnp.cosh, 'tanh': jnp.tanh,
+                'sign': jnp.sign, 'floor': jnp.floor, 'ceil': jnp.ceil,
+                'min': jnp.minimum, 'max': jnp.maximum,
+                'sigmoid': jax.nn.sigmoid,
+            }
             exec(code, local_scope)
             return local_scope['func']
 
@@ -355,13 +399,27 @@ class DAEPaddedGradient:
             all_reinits = reinit_res_fn(t, x_p, z_p, x_r, z_r, p)
             # Start with continuity for all states
             continuity = x_p[:n_x] - x_r[:n_x]
-            state_res = continuity
-            # Scatter each reinit to its state position (compile-time unrolled)
-            for k in range(n_total_reinits):
-                is_mine = (event_idx == reinit_event_owner_arr[k])
-                st = reinit_state_target_arr[k]
-                mask = jnp.arange(n_x) == st
-                state_res = jnp.where(is_mine & mask, all_reinits[k], state_res)
+
+            # Vectorized scatter of reinit residuals into their target state
+            # positions for the currently firing event. Replaces a Python
+            # `for k in range(n_total_reinits)` loop that was being fully
+            # unrolled into the JIT trace — for large N the unrolled trace
+            # was the dominant compile-time cost (3.9× more reinits at
+            # N=15 vs N=7, plus jacrev cotangent multiplier).
+            #
+            # Semantics: per (firing) event, each reinit k targets one
+            # state index `reinit_state_target_arr[k]`, and within one
+            # event a given state index is targeted at most once. So the
+            # scatter is one-to-one for the matching `is_mine` mask.
+            is_mine = (reinit_event_owner_arr == event_idx).astype(all_reinits.dtype)
+            overrides = jnp.zeros(n_x, dtype=all_reinits.dtype).at[
+                reinit_state_target_arr
+            ].add(is_mine * all_reinits)
+            override_count = jnp.zeros(n_x, dtype=all_reinits.dtype).at[
+                reinit_state_target_arr
+            ].add(is_mine)
+            state_res = jnp.where(override_count > 0, overrides, continuity)
+
             r_a = g_fn(t, x_p, z_p, p) if n_z > 0 else jnp.array([])
             return jnp.concatenate([r_g, state_res, r_a])
 
@@ -1240,6 +1298,8 @@ class DAEPaddedGradient:
                 'p_opt': optimized full parameter vector
                 'loss_history': list of loss values per iteration
                 'grad_norm_history': list of gradient norms per iteration
+                'p_history': list of np.ndarray, per-iter values of the
+                    optimized parameters (opt_param_indices order)
                 'n_iter': number of iterations performed
                 'converged': whether gradient norm tolerance was reached
         """
@@ -1254,6 +1314,12 @@ class DAEPaddedGradient:
 
         loss_history = []
         grad_norm_history = []
+        # Per-iteration values of the optimized parameters (in opt_param_indices
+        # order). Cheap to record (a small host transfer of n_opt floats per
+        # iter) and lets callers compute, e.g., a prediction-error series
+        # ‖p_iter − p_true‖ comparable across optimizers.
+        p_history = []
+        opt_idx_array = jnp.array(opt_param_indices)
         converged = False
 
         print(f"Adam optimization: {len(opt_param_indices)} parameters, max_iter={max_iter}, lr={step_size}")
@@ -1295,6 +1361,7 @@ class DAEPaddedGradient:
 
             loss_history.append(loss_val)
             grad_norm_history.append(grad_norm)
+            p_history.append(np.asarray(p_current[opt_idx_array]).copy())
 
             # --- Adam update ---
             m = beta1 * m + (1.0 - beta1) * grad_opt
@@ -1303,7 +1370,7 @@ class DAEPaddedGradient:
             v_hat = v / (1.0 - beta2 ** it)
             step = step_size * m_hat / (jnp.sqrt(v_hat) + epsilon)
 
-            p_current = p_current.at[jnp.array(opt_param_indices)].add(-step)
+            p_current = p_current.at[opt_idx_array].add(-step)
 
             elapsed = (time.perf_counter() - t0) * 1000.0
             iter_times.append(elapsed)
@@ -1330,6 +1397,7 @@ class DAEPaddedGradient:
             'p_opt': p_current,
             'loss_history': loss_history,
             'grad_norm_history': grad_norm_history,
+            'p_history': p_history,
             'n_iter': it,
             'converged': converged,
             'avg_iter_time': avg_iter_time

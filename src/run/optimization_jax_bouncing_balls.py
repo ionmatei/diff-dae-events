@@ -201,7 +201,7 @@ def run_optimization_test():
 
     # --- 3. Biased initial guess ---
     bias = {
-        'g': -0.00,
+        'g': + 1.00,
         'e_g': 0.1,  # 0.8 -> 0.65
         'e_b': 0.1,  # 0.9 -> 0.75
     }
@@ -408,32 +408,33 @@ def run_optimization_test():
     print(f"Plot saved to: {plot_path}")
     
     # --- 7. Animation ---
-    print("\nGenerating animation...")
-    
-    # Reconstruction of true trajectory for animation
-    true_sim_t = []
-    true_sim_x = []
-    for seg in sol_true.segments:
-        if len(seg.t) > 0:
-            true_sim_t.append(seg.t)
-            true_sim_x.append(seg.x)
-    
-    if true_sim_t:
-        traj_true = np.concatenate(true_sim_x)
-    else:
-        traj_true = np.zeros((0, n_x))
-
-    # Get bounds
-    p_dict = dict(zip(param_names, true_p))
-    x_min, x_max = p_dict['x_min'], p_dict['x_max']
-    y_min, y_max = p_dict['y_min'], p_dict['y_max']
-
     if generate_animation:
+        print("\nGenerating animation...")
+        
+        # Reconstruction of true trajectory for animation
+        true_sim_t = []
+        true_sim_x = []
+        for seg in sol_true.segments:
+            if len(seg.t) > 0:
+                true_sim_t.append(seg.t)
+                true_sim_x.append(seg.x)
+        
+        if true_sim_t:
+            traj_true = np.concatenate(true_sim_x)
+        else:
+            traj_true = np.zeros((0, n_x))
+
+        # Get bounds
+        p_dict = dict(zip(param_names, true_p))
+        x_min, x_max = p_dict['x_min'], p_dict['x_max']
+        y_min, y_max = p_dict['y_min'], p_dict['y_max']
+
+
         create_animation(
-            sim_t, sim_x, traj_true,
-            x_min, x_max, y_min, y_max,
-            filename=os.path.join(root_dir, 'results', 'animation_jax_balls.mp4')
-        )
+                sim_t, sim_x, traj_true,
+                x_min, x_max, y_min, y_max,
+                filename=os.path.join(root_dir, 'results', 'animation_jax_balls.mp4')
+            )
     # Return benchmark results
     benchmark_results = {
         'method': 'jax_multi',
@@ -441,7 +442,6 @@ def run_optimization_test():
         'avg_iter_time': result.get('avg_iter_time', 0.0),
         'p_opt': dict(zip(param_names, np.asarray(p_opt))),
         'p_true': dict(zip(param_names, true_p)),
-        'final_validation_loss': float(val_mse),
         'iterations': result['n_iter'],
         'converged': bool(result['converged'])
     }

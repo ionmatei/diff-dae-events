@@ -274,7 +274,7 @@
   ],
   "g": [
     "0 = (-((C5_C * DER_C5_v) + (-(C4_C * (DER_C3_v - DER_C5_v))) - L2_i - (0.0))) - (C5_v / R2_R_actual)",
-    "0 = (-(L1_i + (C2_C * (DER_C1_v - DER_C3_v)) + (C1_C * DER_C1_v) - (0.0))) - ((-((V_signalSource_offset + (V_signalSource_height * (1.0 + tanh(5.0 * (time - V_signalSource_startTime))) / 2.0)) - C1_v)) / R1_R_actual)",
+    "0 = (-(L1_i + (C2_C * (DER_C1_v - DER_C3_v)) + (C1_C * DER_C1_v) - (0.0))) - ((-((V_signalSource_offset + (V_signalSource_height * (1.0 + tanh(50.0 * (time - V_signalSource_startTime))) / 2.0)) - C1_v)) / R1_R_actual)",
     "0 = L2_i + (C4_C * (DER_C3_v - DER_C5_v)) + (C3_C * DER_C3_v) + (-(C2_C * (DER_C1_v - DER_C3_v))) - L1_i - (0.0)"
   ],
   "h": null

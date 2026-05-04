@@ -71,15 +71,38 @@ class DAESolver:
     The DAE is converted to an ODE by solving algebraic equations at each timestep.
     """
 
-    def __init__(self, dae_data: dict, verbose: bool = True):
+    def __init__(self, dae_data: dict, verbose: bool = True,
+                 zeno_dt_threshold: float = 1.0e-4,
+                 zeno_window_events: int = 10,
+                 zeno_window_seconds: float = 5.0e-3,
+                 use_compiled_residual: bool = True):
         """
         Load DAE from JSON specification.
 
         Args:
             dae_data: Dictionary containing DAE specification
             verbose: Whether to print loading/compilation messages
+            zeno_dt_threshold: Time gap (seconds) below which two consecutive
+                *same-index* events are treated as Zeno chattering and the
+                simulation is terminated early.
+            zeno_window_events: Number of recent events used by the
+                rate-based Zeno detector (default 10).
+            zeno_window_seconds: If `zeno_window_events + 1` consecutive
+                events span less than this many seconds, the simulation
+                terminates (default 5 ms). Catches sustained chatter even
+                when several balls bounce against the floor in alternation
+                (which the same-index check alone misses), without
+                triggering on legitimate close-clusters of distinct events
+                (e.g. several balls landing within ~1 ms of each other).
         """
         self.verbose = verbose
+        self.zeno_dt_threshold = float(zeno_dt_threshold)
+        self.zeno_window_events = int(zeno_window_events)
+        self.zeno_window_seconds = float(zeno_window_seconds)
+        self.use_compiled_residual = bool(use_compiled_residual)
+        self._f_impl = None
+        self._g_impl = None
+        self._zc_impl = None
         form = dae_data
 
         # Extract variables
@@ -126,6 +149,14 @@ class DAESolver:
 
         # Compile event handling (when clauses)
         self._compile_events()
+
+        # Compile a single-function fast path for f, g, zc. This consolidates
+        # the per-equation eval() loop into one compiled function that writes
+        # the entire residual / event vector in one call. Auto-detected:
+        # falls back transparently to the eval-based path if state / alg /
+        # parameter names collide with Python keywords or namespace entries.
+        if self.use_compiled_residual:
+            self._compile_residual_fast_path()
 
         # Compile JAX vectorized functions (vmap) once during initialization
         self._compile_vectorized_functions()
@@ -281,7 +312,147 @@ class DAESolver:
         
         if self.verbose:
             print("Event clauses compiled successfully!")
-    
+
+    # ---------------------------------------------------------------- #
+    # Compiled residual fast path
+    # ---------------------------------------------------------------- #
+    def _compile_residual_fast_path(self) -> bool:
+        """
+        Build single compiled Python functions for f, g, and zc that write
+        the entire output vector in one call. Replaces the per-equation
+        eval(expr, ns) loop on the IDA hot path (one Python eval per
+        equation, plus a fresh namespace dict per call).
+
+        Auto-detect: requires state / alg / parameter names to be valid
+        Python identifiers that do not collide with the math-fn closure or
+        with reserved local names. If any name is incompatible, the fast
+        path is left disabled and the existing eval-based path is used.
+
+        Sets self._f_impl, self._g_impl, self._zc_impl on success. They
+        each have signature (t, x, z, p, out) and write into out in place.
+        """
+        import keyword
+
+        ns_keys = {
+            'sin', 'cos', 'tan', 'sinh', 'cosh', 'tanh',
+            'exp', 'log', 'log10', 'sqrt', 'abs', 'pow',
+            'min', 'max',
+            't', 'time', '_x', '_z', '_p', '_out',
+        }
+
+        def _safe(name: str) -> bool:
+            return (
+                isinstance(name, str)
+                and name.isidentifier()
+                and not keyword.iskeyword(name)
+                and name not in ns_keys
+            )
+
+        all_names = self.state_names + self.alg_names + self.param_names
+        bad = [n for n in all_names if not _safe(n)]
+        if bad:
+            if self.verbose:
+                preview = ", ".join(bad[:5]) + (" ..." if len(bad) > 5 else "")
+                print(f"Compiled residual fast path: disabled "
+                      f"(incompatible name(s): {preview})")
+            return False
+
+        # Build the shared preamble: unpack t, states, algebraics, params
+        # into local variables so the per-equation expressions can reference
+        # them by their original symbolic names.
+        preamble = ["    time = t"]
+        for i, name in enumerate(self.state_names):
+            preamble.append(f"    {name} = _x[{i}]")
+        for i, name in enumerate(self.alg_names):
+            preamble.append(f"    {name} = _z[{i}]")
+        for i, name in enumerate(self.param_names):
+            preamble.append(f"    {name} = _p[{i}]")
+        preamble_str = "\n".join(preamble) if preamble else "    pass"
+
+        def _build(fn_name: str, exprs):
+            if not exprs:
+                return f"def {fn_name}(t, _x, _z, _p, _out):\n    return\n"
+            lines = [f"def {fn_name}(t, _x, _z, _p, _out):", preamble_str]
+            for i, expr in enumerate(exprs):
+                lines.append(f"    _out[{i}] = {expr}")
+            return "\n".join(lines) + "\n"
+
+        zc_funcs = self.zc_funcs if hasattr(self, 'zc_funcs') else []
+        src = (
+            _build("_f_impl", self.f_funcs)
+            + _build("_g_impl", self.g_funcs)
+            + _build("_zc_impl", zc_funcs)
+        )
+
+        # Closure: math fns route through numpy, identical to the eval path.
+        glb = {
+            '__builtins__': {},
+            'sin': np.sin, 'cos': np.cos, 'tan': np.tan,
+            'sinh': np.sinh, 'cosh': np.cosh, 'tanh': np.tanh,
+            'exp': np.exp, 'log': np.log, 'log10': np.log10,
+            'sqrt': np.sqrt, 'abs': np.abs, 'pow': np.power,
+            'min': np.minimum, 'max': np.maximum,
+        }
+        locs: Dict = {}
+        try:
+            exec(compile(src, "<dae_compiled_residual>", "exec"), glb, locs)
+        except Exception as e:
+            if self.verbose:
+                print(f"Compiled residual fast path: disabled "
+                      f"(compilation failed: {e})")
+            return False
+
+        f_impl = locs['_f_impl']
+        g_impl = locs['_g_impl']
+        zc_impl = locs['_zc_impl']
+
+        # Numerical-equivalence check at the initial conditions: ensures
+        # the compiled path produces identical results to the eval-based
+        # path before we let it into the hot loop. If it disagrees we
+        # disable transparently and the user sees the eval fallback.
+        n_states = len(self.state_names)
+        n_alg = len(self.alg_names)
+        n_events = self.n_events
+        try:
+            x_test = np.asarray(self.x0, dtype=float)
+            z_test = np.asarray(self.z0, dtype=float)
+            t_test = 0.0
+
+            out_f = np.zeros(n_states)
+            f_impl(t_test, x_test, z_test, self.p, out_f)
+            ref_f = self.eval_f(t_test, x_test, z_test)
+            if not np.allclose(out_f, ref_f, rtol=1e-12, atol=1e-12):
+                raise RuntimeError("f mismatch on initial conditions")
+
+            if n_alg > 0:
+                out_g = np.zeros(n_alg)
+                g_impl(t_test, x_test, z_test, self.p, out_g)
+                ref_g = self.eval_g(t_test, x_test, z_test)
+                if not np.allclose(out_g, ref_g, rtol=1e-12, atol=1e-12):
+                    raise RuntimeError("g mismatch on initial conditions")
+
+            if n_events > 0:
+                out_zc = np.zeros(n_events)
+                zc_impl(t_test, x_test, z_test, self.p, out_zc)
+                ref_zc = self.eval_zc(t_test, x_test, z_test)
+                if not np.allclose(out_zc, ref_zc, rtol=1e-12, atol=1e-12):
+                    raise RuntimeError("zc mismatch on initial conditions")
+        except Exception as e:
+            if self.verbose:
+                print(f"Compiled residual fast path: disabled "
+                      f"(validation failed: {e})")
+            return False
+
+        self._f_impl = f_impl
+        self._g_impl = g_impl
+        self._zc_impl = zc_impl
+
+        if self.verbose:
+            print("Compiled residual fast path: enabled "
+                  f"(f:{len(self.f_funcs)}, g:{len(self.g_funcs)}, "
+                  f"zc:{len(zc_funcs)})")
+        return True
+
     def _parse_condition_to_zc(self, condition: str) -> str:
         """
         Parse a condition like 'h<0' into a zero-crossing function 'h - 0'.
@@ -513,14 +684,20 @@ class DAESolver:
     def _root_fn_wrapper(self, t: float, y: np.ndarray, ydot: np.ndarray, out: np.ndarray):
         """
         Wrapper for IDA root-finding.
-        
+
         This is called by IDA to detect zero-crossings.
         Signature must match IDA's expected interface: (t, y, ydot, out)
         """
         n_states = len(self.state_names)
         x = y[:n_states]
         z = y[n_states:]
-        
+
+        if self._zc_impl is not None and self.n_events > 0:
+            # Compiled fast path: writes directly into IDA's out buffer,
+            # no per-equation eval(), no per-call namespace dict.
+            self._zc_impl(t, x, z, self.p, out)
+            return
+
         zc = self.eval_zc(t, x, z)
         out[:] = zc
 
@@ -929,7 +1106,17 @@ class DAESolver:
         z = y[n_states:]
         xdot = ydot[:n_states]
 
-        # Evaluate f and g
+        if self._f_impl is not None:
+            # Compiled fast path: write -f into res[:n_states], then add
+            # xdot in place. No temporaries, no per-equation eval().
+            res_x = res[:n_states]
+            self._f_impl(t, x, z, self.p, res_x)
+            np.subtract(xdot, res_x, out=res_x)
+            if self._g_impl is not None and len(z) > 0:
+                self._g_impl(t, x, z, self.p, res[n_states:])
+            return
+
+        # Evaluate f and g (eval-based fallback)
         f_vals = self.eval_f(t, x, z)
         g_vals = self.eval_g(t, x, z)
 
@@ -1402,7 +1589,7 @@ class DAESolver:
         
         # Initialize event tracking
         zc_vals = self.eval_zc(t_curr, self.x0, self.z0)
-        cond_active_prev = (zc_vals < 0)  # Boolean state memory
+        cond_active_prev = (zc_vals <= 0)  # Boolean state memory (treat boundary as active to avoid re-fire after a position clamp)
         
         event_times = []
         event_indices = []
@@ -1481,10 +1668,15 @@ class DAESolver:
                 # -----------------------------------------------------------
                 # FIX: Check for "Zeno" behavior (consecutive events without flow)
                 # -----------------------------------------------------------
-                # If the solver returned only 1 or 2 points (start + event point),
-                # it means there was essentially no continuous evolution between events.
-                # len(sol.values.t) <= 2 usually implies: [t_prev_event, t_curr_event]
-                if len(sol.values.t) <= 2 and last_event_time > -np.inf:
+                # We declare Zeno only when (a) the solver returned <= 2 points
+                # (no intermediate evolution) AND (b) the time gap to the prior
+                # event is below `zeno_dt_threshold`. Distinct legitimate events
+                # firing within a small but finite gap (e.g. several balls
+                # landing within a few ms) used to terminate the run; the
+                # time-gap check now lets those proceed.
+                if (len(sol.values.t) <= 2
+                        and last_event_time > -np.inf
+                        and (t_curr - last_event_time) < self.zeno_dt_threshold):
                     if verbose:
                         print(f"    Consecutive events detected without intermediate samples!")
                         print(f"    Terminating simulation early at t={t_curr:.6f} to prevent Zeno bottleneck.")
@@ -1593,8 +1785,8 @@ class DAESolver:
                     # This ensures 'cond_active_prev' is correct for the start 
                     # of the next continuous segment.
                     zc_post = self.eval_zc(t_curr, x_curr, z_curr)
-                    cond_active_prev = (zc_post < 0)
-                    
+                    cond_active_prev = (zc_post <= 0)
+
                     if verbose:
                         print(f"      Re-init complete. New condition states: {cond_active_prev}")
                 
@@ -1686,9 +1878,11 @@ class DAESolver:
         yp_curr = np.concatenate([f0, np.zeros(len(self.z0))])
         
         # Initialize event tracking condition
-        # We only trigger events when condition goes False -> True (Falling edge of zc)
+        # We only trigger events when condition goes False -> True (Falling edge of zc).
+        # Boundary (zc == 0) is treated as already-active so a freshly-clamped
+        # state does not re-fire its own event.
         zc_vals = self.eval_zc(t_curr, self.x0, self.z0)
-        cond_active_prev = (zc_vals < 0)
+        cond_active_prev = (zc_vals <= 0)
 
         # 2. Setup Loop Storage
         segments = []
@@ -1779,23 +1973,24 @@ class DAESolver:
                 # 2. Identify Event Candidates
                 triggered_candidates = []
                 
-                # Try to find roots in the return object first (if it has val/t etc)
-                # Also check solver.roots.val legacy location
-                if hasattr(solver, 'roots') and hasattr(solver.roots, 'val'):
-                     triggered_candidates = [i for i, v in enumerate(solver.roots.val) if v != 0]
-                
-                # Fallback: check zero crossings manually if IDA info is missing or ambiguous
-                if not triggered_candidates:
-                     zc = self.eval_zc(tau, x_new, z_new)
-                     triggered_candidates = [i for i, v in enumerate(zc) if abs(v) < 1e-3]
-                
-                # 3. Filter Candidates by Direction (Falling Edge Only)
-                # We only want to trigger if we were NOT active before (Positive zc)
-                # and are now Active (Negative zc, or crossing 0).
-                real_events = []
-                for idx in triggered_candidates:
-                    if not cond_active_prev[idx]:
-                        real_events.append(idx)
+                # 2. Identify events that actually crossed at this tau.
+                # We always check the state directly: an event is triggered
+                # iff zc[i] <= 0 at tau AND it was inactive before. Relying
+                # on solver.roots.val is not reliable when several events
+                # cross within one integrator step (e.g. multiple balls
+                # landing at the floor in close succession): IDA may mark
+                # all of them in roots.val even though only one actually
+                # crossed at tau, which historically caused wrong-event
+                # attribution and skipped reinits.
+                zc = self.eval_zc(tau, x_new, z_new)
+                triggered_candidates = [i for i in range(self.n_events)
+                                        if zc[i] <= 0]
+
+                # 3. Filter by direction: a real event requires the
+                # condition to have just transitioned from inactive (zc>0)
+                # to active (zc<=0).
+                real_events = [idx for idx in triggered_candidates
+                               if not cond_active_prev[idx]]
                 
                 if real_events:
                     # Handle Primary Event (Simultaneous handling could be added, prioritizing first for now)
@@ -1809,11 +2004,21 @@ class DAESolver:
                     # ----------------------------------------------------------------
                     # FIX: Zeno Clamping (Consecutive events without intermediate samples)
                     # ----------------------------------------------------------------
-                    # If len(cur_t) <= 2, it means we have [start_time] or [start_time, event_time]
-                    # with NO intermediate solver steps.
-                    # This implies the event happened immediately or after a single (possibly tiny) step.
-                    # If we had a previous event, this counts as "consecutive events without samples".
-                    if len(cur_t) <= 2 and len(events) > 0:
+                    # We declare Zeno only when the *same* event index re-fires
+                    # with a small time gap. Distinct events from different
+                    # balls firing close in time (e.g. several balls landing on
+                    # the floor within ~1 ms) are legitimate and must not
+                    # terminate the run. A ball settling to rest, on the other
+                    # hand, produces a geometric series of same-index Floor
+                    # events with dt halving each step -- that is real Zeno
+                    # and we stop the simulation there to keep the state
+                    # physically valid (otherwise gravity drags the ball
+                    # through the floor once the rebound velocity reaches 0).
+                    prev_event = events[-1] if events else None
+                    if (len(cur_t) <= 2
+                            and prev_event is not None
+                            and prev_event.event_idx == event_idx
+                            and (tau - prev_event.t_event) < self.zeno_dt_threshold):
                         print(f"Warning: Zeno barrier detected (Event triggered immediately after previous event).")
                         print(f"  Terminating simulation at t={tau:.6f} to prevent infinite loop.")
                         
@@ -1896,6 +2101,28 @@ class DAESolver:
                         x_pre=x_pre, z_pre=z_pre,
                         x_post=x_post, z_post=z_post
                     ))
+
+                    # 6b. Rate-based Zeno guard: if many recent events fit in
+                    # a tiny time window, this is sustained chatter (a ball
+                    # settling onto the floor, or a small group of balls
+                    # alternating bounces). Beyond this point velocities
+                    # collapse and the simplified physics (no normal force)
+                    # would let gravity drag balls through the boundary, so
+                    # we stop the simulation here.
+                    K = self.zeno_window_events
+                    if len(events) > K:
+                        recent_span = events[-1].t_event - events[-1 - K].t_event
+                        if recent_span < self.zeno_window_seconds:
+                            print(f"Warning: Zeno chatter detected "
+                                  f"({K + 1} events within {recent_span:.3e}s). "
+                                  f"Terminating simulation at t={tau:.6f}.")
+                            # Close current segment (segment was started
+                            # right after the previous event).
+                            segments.append(TrajectorySegment(
+                                np.array(cur_t), np.array(cur_x),
+                                np.array(cur_z), np.array(cur_xp)
+                            ))
+                            return AugmentedSolution(segments=segments, events=events)
                     
                     # 7. Update State & Reset Solver
                     t_curr = tau
@@ -1905,10 +2132,12 @@ class DAESolver:
                     f_post = self.eval_f(t_curr, x_post, z_post)
                     yp_curr = np.concatenate([f_post, np.zeros(len(z_post))])
                     
-                    # Update active condition map using POST-EVENT state
-                    # This prevents immediate re-triggering if x_post is still near boundary
+                    # Update active condition map using POST-EVENT state.
+                    # Boundary (zc == 0) is treated as still-active, otherwise
+                    # a position-clamp reinit (which sets zc to exactly 0) would
+                    # let the same event re-fire on the next root scan.
                     zc_post = self.eval_zc(t_curr, x_post, z_post)
-                    cond_active_prev = (zc_post < 0)
+                    cond_active_prev = (zc_post <= 0)
                     
                     # Restart solver
                     solver.init_step(t_curr, y_curr, yp_curr)
@@ -1933,9 +2162,10 @@ class DAESolver:
                         t_curr = tau
                     
                     # Update active conditions based on current state (so we correctly track being 'active')
-                    # e.g. if we just crossed to positive, cond_active_prev becomes False
+                    # e.g. if we just crossed to positive, cond_active_prev becomes False.
+                    # Boundary (zc == 0) is treated as still-active.
                     zc_new = self.eval_zc(t_curr, x_new, z_new)
-                    cond_active_prev = (zc_new < 0)
+                    cond_active_prev = (zc_new <= 0)
                     
                     # Note: We do NOT call init_step here, we let the solver continue from this point.
                     # IDA (scikits.odes) state should be valid to continue.
@@ -1951,24 +2181,23 @@ class DAESolver:
                     cur_z.append(z_new)
                     cur_xp.append(xp_new)
                     t_curr = t_new
-                
+
                 # Check target stop condition
                 if t_curr >= t_end:
                     break
-                
-                # Check for zero crossings that might have been missed or changed state
-                # (Ideally redundant if root finding works, but good for tracking)
-                # But calculating zc every step might be expensive. 
-                # We trust IDA to stop at roots.
-                # However, we MUST keep cond_active_prev updated?
-                # Actually, if no root found, state shouldn't have changed crossing.
-                # But strictly, we should update it if we want to be safe, 
-                # OR we assume it stays same until flag 2.
-                # Let's assume it stays same to save compute.
 
+                # Refresh cond_active_prev from the current state. Without this,
+                # an event that was clamped (zc=0, marked active) will never be
+                # un-marked when the state lifts off the boundary, because IDA
+                # does not reliably emit a +1 root when the function starts at
+                # exactly 0. As a result the same event would never re-fire on
+                # subsequent crossings (e.g. a ball failing to bounce after the
+                # final small bounce of a settling sequence).
+                zc_new = self.eval_zc(t_curr, x_new, z_new)
+                cond_active_prev = (zc_new <= 0)
 
                 t_curr = t_new
-                
+
                 # Append to current buffers
                 cur_t.append(t_new)
                 cur_x.append(x_new)

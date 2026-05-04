@@ -1,0 +1,468 @@
+states:
+- name: x1
+  type: float
+  start: 1.7355510369716765
+  orig_name: x1
+- name: y1
+  type: float
+  start: 5.793995878549119
+  orig_name: y1
+- name: vx1
+  type: float
+  start: -0.5763262006649337
+  orig_name: vx1
+- name: vy1
+  type: float
+  start: -0.5040336503479743
+  orig_name: vy1
+- name: x2
+  type: float
+  start: 5.05159088058806
+  orig_name: x2
+- name: y2
+  type: float
+  start: 5.828652724163804
+  orig_name: y2
+- name: vx2
+  type: float
+  start: -0.04989873172751189
+  orig_name: vx2
+- name: vy2
+  type: float
+  start: -0.4702323424064013
+  orig_name: vy2
+- name: x3
+  type: float
+  start: 8.317447649499503
+  orig_name: x3
+- name: y3
+  type: float
+  start: 5.85000974122434
+  orig_name: y3
+- name: vx3
+  type: float
+  start: 0.681949251193648
+  orig_name: vx3
+- name: vy3
+  type: float
+  start: -0.5132032136169118
+  orig_name: vy3
+- name: x4
+  type: float
+  start: 1.6184500167252593
+  orig_name: x4
+- name: y4
+  type: float
+  start: 7.581622577039067
+  orig_name: y4
+- name: vx4
+  type: float
+  start: -0.5034429047924693
+  orig_name: vx4
+- name: vy4
+  type: float
+  start: -0.005571456909457331
+  orig_name: vy4
+- name: x5
+  type: float
+  start: 5.002254944273722
+  orig_name: x5
+- name: y5
+  type: float
+  start: 7.500937371163478
+  orig_name: y5
+- name: vx5
+  type: float
+  start: 0.062043447199317925
+  orig_name: vx5
+- name: vy5
+  type: float
+  start: -0.07985975838632685
+  orig_name: vy5
+- name: x6
+  type: float
+  start: 8.314320160823417
+  orig_name: x6
+- name: y6
+  type: float
+  start: 7.456367568879941
+  orig_name: y6
+- name: vx6
+  type: float
+  start: 0.6804331900879166
+  orig_name: vx6
+- name: vy6
+  type: float
+  start: -0.01316563290924326
+  orig_name: vy6
+- name: x7
+  type: float
+  start: 1.7234263844736213
+  orig_name: x7
+- name: y7
+  type: float
+  start: 9.217827507498113
+  orig_name: y7
+- name: vx7
+  type: float
+  start: -0.6379704861361335
+  orig_name: vx7
+- name: vy7
+  type: float
+  start: 0.5721773946887604
+  orig_name: vy7
+alg_vars: []
+inputs: null
+outputs: null
+parameters:
+- name: g
+  type: float
+  value: 9.81
+  orig_name: g
+- name: e_g
+  type: float
+  value: 0.5
+  orig_name: e_g
+- name: e_b
+  type: float
+  value: 0.6
+  orig_name: e_b
+- name: d_sq
+  type: float
+  value: 0.05
+  orig_name: d_sq
+- name: y_max
+  type: float
+  value: 10.0
+  orig_name: y_max
+- name: y_min
+  type: float
+  value: 0.0
+  orig_name: y_min
+- name: x_max
+  type: float
+  value: 10.0
+  orig_name: x_max
+- name: x_min
+  type: float
+  value: 0.0
+  orig_name: x_min
+f:
+- der(x1) = vx1
+- der(y1) = vy1
+- der(vx1) = 0
+- der(vy1) = -g
+- der(x2) = vx2
+- der(y2) = vy2
+- der(vx2) = 0
+- der(vy2) = -g
+- der(x3) = vx3
+- der(y3) = vy3
+- der(vx3) = 0
+- der(vy3) = -g
+- der(x4) = vx4
+- der(y4) = vy4
+- der(vx4) = 0
+- der(vy4) = -g
+- der(x5) = vx5
+- der(y5) = vy5
+- der(vx5) = 0
+- der(vy5) = -g
+- der(x6) = vx6
+- der(y6) = vy6
+- der(vx6) = 0
+- der(vy6) = -g
+- der(x7) = vx7
+- der(y7) = vy7
+- der(vx7) = 0
+- der(vy7) = -g
+g: []
+h: []
+when:
+- comment: Floor B1
+  condition: y1 - y_min < 0
+  reinit:
+  - vy1 + e_g * prev(vy1) = 0
+  - y1 - y_min = 0
+- comment: Ceiling B1
+  condition: -y1 + y_max < 0
+  reinit:
+  - vy1 + e_g * prev(vy1) = 0
+  - y1 - y_max = 0
+- comment: Left Wall B1
+  condition: x1 - x_min < 0
+  reinit:
+  - vx1 + e_g * prev(vx1) = 0
+  - x1 - x_min = 0
+- comment: Right Wall B1
+  condition: -x1 + x_max < 0
+  reinit:
+  - vx1 + e_g * prev(vx1) = 0
+  - x1 - x_max = 0
+- comment: Floor B2
+  condition: y2 - y_min < 0
+  reinit:
+  - vy2 + e_g * prev(vy2) = 0
+  - y2 - y_min = 0
+- comment: Ceiling B2
+  condition: -y2 + y_max < 0
+  reinit:
+  - vy2 + e_g * prev(vy2) = 0
+  - y2 - y_max = 0
+- comment: Left Wall B2
+  condition: x2 - x_min < 0
+  reinit:
+  - vx2 + e_g * prev(vx2) = 0
+  - x2 - x_min = 0
+- comment: Right Wall B2
+  condition: -x2 + x_max < 0
+  reinit:
+  - vx2 + e_g * prev(vx2) = 0
+  - x2 - x_max = 0
+- comment: Floor B3
+  condition: y3 - y_min < 0
+  reinit:
+  - vy3 + e_g * prev(vy3) = 0
+  - y3 - y_min = 0
+- comment: Ceiling B3
+  condition: -y3 + y_max < 0
+  reinit:
+  - vy3 + e_g * prev(vy3) = 0
+  - y3 - y_max = 0
+- comment: Left Wall B3
+  condition: x3 - x_min < 0
+  reinit:
+  - vx3 + e_g * prev(vx3) = 0
+  - x3 - x_min = 0
+- comment: Right Wall B3
+  condition: -x3 + x_max < 0
+  reinit:
+  - vx3 + e_g * prev(vx3) = 0
+  - x3 - x_max = 0
+- comment: Floor B4
+  condition: y4 - y_min < 0
+  reinit:
+  - vy4 + e_g * prev(vy4) = 0
+  - y4 - y_min = 0
+- comment: Ceiling B4
+  condition: -y4 + y_max < 0
+  reinit:
+  - vy4 + e_g * prev(vy4) = 0
+  - y4 - y_max = 0
+- comment: Left Wall B4
+  condition: x4 - x_min < 0
+  reinit:
+  - vx4 + e_g * prev(vx4) = 0
+  - x4 - x_min = 0
+- comment: Right Wall B4
+  condition: -x4 + x_max < 0
+  reinit:
+  - vx4 + e_g * prev(vx4) = 0
+  - x4 - x_max = 0
+- comment: Floor B5
+  condition: y5 - y_min < 0
+  reinit:
+  - vy5 + e_g * prev(vy5) = 0
+  - y5 - y_min = 0
+- comment: Ceiling B5
+  condition: -y5 + y_max < 0
+  reinit:
+  - vy5 + e_g * prev(vy5) = 0
+  - y5 - y_max = 0
+- comment: Left Wall B5
+  condition: x5 - x_min < 0
+  reinit:
+  - vx5 + e_g * prev(vx5) = 0
+  - x5 - x_min = 0
+- comment: Right Wall B5
+  condition: -x5 + x_max < 0
+  reinit:
+  - vx5 + e_g * prev(vx5) = 0
+  - x5 - x_max = 0
+- comment: Floor B6
+  condition: y6 - y_min < 0
+  reinit:
+  - vy6 + e_g * prev(vy6) = 0
+  - y6 - y_min = 0
+- comment: Ceiling B6
+  condition: -y6 + y_max < 0
+  reinit:
+  - vy6 + e_g * prev(vy6) = 0
+  - y6 - y_max = 0
+- comment: Left Wall B6
+  condition: x6 - x_min < 0
+  reinit:
+  - vx6 + e_g * prev(vx6) = 0
+  - x6 - x_min = 0
+- comment: Right Wall B6
+  condition: -x6 + x_max < 0
+  reinit:
+  - vx6 + e_g * prev(vx6) = 0
+  - x6 - x_max = 0
+- comment: Floor B7
+  condition: y7 - y_min < 0
+  reinit:
+  - vy7 + e_g * prev(vy7) = 0
+  - y7 - y_min = 0
+- comment: Ceiling B7
+  condition: -y7 + y_max < 0
+  reinit:
+  - vy7 + e_g * prev(vy7) = 0
+  - y7 - y_max = 0
+- comment: Left Wall B7
+  condition: x7 - x_min < 0
+  reinit:
+  - vx7 + e_g * prev(vx7) = 0
+  - x7 - x_min = 0
+- comment: Right Wall B7
+  condition: -x7 + x_max < 0
+  reinit:
+  - vx7 + e_g * prev(vx7) = 0
+  - x7 - x_max = 0
+- comment: Collision B1-B2
+  condition: (x1-x2)**2 + (y1-y2)**2 - d_sq < 0
+  reinit:
+  - vx1 + e_b * prev(vx1) = 0
+  - vy1 + e_b * prev(vy1) = 0
+  - vx2 + e_b * prev(vx2) = 0
+  - vy2 + e_b * prev(vy2) = 0
+- comment: Collision B1-B3
+  condition: (x1-x3)**2 + (y1-y3)**2 - d_sq < 0
+  reinit:
+  - vx1 + e_b * prev(vx1) = 0
+  - vy1 + e_b * prev(vy1) = 0
+  - vx3 + e_b * prev(vx3) = 0
+  - vy3 + e_b * prev(vy3) = 0
+- comment: Collision B1-B4
+  condition: (x1-x4)**2 + (y1-y4)**2 - d_sq < 0
+  reinit:
+  - vx1 + e_b * prev(vx1) = 0
+  - vy1 + e_b * prev(vy1) = 0
+  - vx4 + e_b * prev(vx4) = 0
+  - vy4 + e_b * prev(vy4) = 0
+- comment: Collision B1-B5
+  condition: (x1-x5)**2 + (y1-y5)**2 - d_sq < 0
+  reinit:
+  - vx1 + e_b * prev(vx1) = 0
+  - vy1 + e_b * prev(vy1) = 0
+  - vx5 + e_b * prev(vx5) = 0
+  - vy5 + e_b * prev(vy5) = 0
+- comment: Collision B1-B6
+  condition: (x1-x6)**2 + (y1-y6)**2 - d_sq < 0
+  reinit:
+  - vx1 + e_b * prev(vx1) = 0
+  - vy1 + e_b * prev(vy1) = 0
+  - vx6 + e_b * prev(vx6) = 0
+  - vy6 + e_b * prev(vy6) = 0
+- comment: Collision B1-B7
+  condition: (x1-x7)**2 + (y1-y7)**2 - d_sq < 0
+  reinit:
+  - vx1 + e_b * prev(vx1) = 0
+  - vy1 + e_b * prev(vy1) = 0
+  - vx7 + e_b * prev(vx7) = 0
+  - vy7 + e_b * prev(vy7) = 0
+- comment: Collision B2-B3
+  condition: (x2-x3)**2 + (y2-y3)**2 - d_sq < 0
+  reinit:
+  - vx2 + e_b * prev(vx2) = 0
+  - vy2 + e_b * prev(vy2) = 0
+  - vx3 + e_b * prev(vx3) = 0
+  - vy3 + e_b * prev(vy3) = 0
+- comment: Collision B2-B4
+  condition: (x2-x4)**2 + (y2-y4)**2 - d_sq < 0
+  reinit:
+  - vx2 + e_b * prev(vx2) = 0
+  - vy2 + e_b * prev(vy2) = 0
+  - vx4 + e_b * prev(vx4) = 0
+  - vy4 + e_b * prev(vy4) = 0
+- comment: Collision B2-B5
+  condition: (x2-x5)**2 + (y2-y5)**2 - d_sq < 0
+  reinit:
+  - vx2 + e_b * prev(vx2) = 0
+  - vy2 + e_b * prev(vy2) = 0
+  - vx5 + e_b * prev(vx5) = 0
+  - vy5 + e_b * prev(vy5) = 0
+- comment: Collision B2-B6
+  condition: (x2-x6)**2 + (y2-y6)**2 - d_sq < 0
+  reinit:
+  - vx2 + e_b * prev(vx2) = 0
+  - vy2 + e_b * prev(vy2) = 0
+  - vx6 + e_b * prev(vx6) = 0
+  - vy6 + e_b * prev(vy6) = 0
+- comment: Collision B2-B7
+  condition: (x2-x7)**2 + (y2-y7)**2 - d_sq < 0
+  reinit:
+  - vx2 + e_b * prev(vx2) = 0
+  - vy2 + e_b * prev(vy2) = 0
+  - vx7 + e_b * prev(vx7) = 0
+  - vy7 + e_b * prev(vy7) = 0
+- comment: Collision B3-B4
+  condition: (x3-x4)**2 + (y3-y4)**2 - d_sq < 0
+  reinit:
+  - vx3 + e_b * prev(vx3) = 0
+  - vy3 + e_b * prev(vy3) = 0
+  - vx4 + e_b * prev(vx4) = 0
+  - vy4 + e_b * prev(vy4) = 0
+- comment: Collision B3-B5
+  condition: (x3-x5)**2 + (y3-y5)**2 - d_sq < 0
+  reinit:
+  - vx3 + e_b * prev(vx3) = 0
+  - vy3 + e_b * prev(vy3) = 0
+  - vx5 + e_b * prev(vx5) = 0
+  - vy5 + e_b * prev(vy5) = 0
+- comment: Collision B3-B6
+  condition: (x3-x6)**2 + (y3-y6)**2 - d_sq < 0
+  reinit:
+  - vx3 + e_b * prev(vx3) = 0
+  - vy3 + e_b * prev(vy3) = 0
+  - vx6 + e_b * prev(vx6) = 0
+  - vy6 + e_b * prev(vy6) = 0
+- comment: Collision B3-B7
+  condition: (x3-x7)**2 + (y3-y7)**2 - d_sq < 0
+  reinit:
+  - vx3 + e_b * prev(vx3) = 0
+  - vy3 + e_b * prev(vy3) = 0
+  - vx7 + e_b * prev(vx7) = 0
+  - vy7 + e_b * prev(vy7) = 0
+- comment: Collision B4-B5
+  condition: (x4-x5)**2 + (y4-y5)**2 - d_sq < 0
+  reinit:
+  - vx4 + e_b * prev(vx4) = 0
+  - vy4 + e_b * prev(vy4) = 0
+  - vx5 + e_b * prev(vx5) = 0
+  - vy5 + e_b * prev(vy5) = 0
+- comment: Collision B4-B6
+  condition: (x4-x6)**2 + (y4-y6)**2 - d_sq < 0
+  reinit:
+  - vx4 + e_b * prev(vx4) = 0
+  - vy4 + e_b * prev(vy4) = 0
+  - vx6 + e_b * prev(vx6) = 0
+  - vy6 + e_b * prev(vy6) = 0
+- comment: Collision B4-B7
+  condition: (x4-x7)**2 + (y4-y7)**2 - d_sq < 0
+  reinit:
+  - vx4 + e_b * prev(vx4) = 0
+  - vy4 + e_b * prev(vy4) = 0
+  - vx7 + e_b * prev(vx7) = 0
+  - vy7 + e_b * prev(vy7) = 0
+- comment: Collision B5-B6
+  condition: (x5-x6)**2 + (y5-y6)**2 - d_sq < 0
+  reinit:
+  - vx5 + e_b * prev(vx5) = 0
+  - vy5 + e_b * prev(vy5) = 0
+  - vx6 + e_b * prev(vx6) = 0
+  - vy6 + e_b * prev(vy6) = 0
+- comment: Collision B5-B7
+  condition: (x5-x7)**2 + (y5-y7)**2 - d_sq < 0
+  reinit:
+  - vx5 + e_b * prev(vx5) = 0
+  - vy5 + e_b * prev(vy5) = 0
+  - vx7 + e_b * prev(vx7) = 0
+  - vy7 + e_b * prev(vy7) = 0
+- comment: Collision B6-B7
+  condition: (x6-x7)**2 + (y6-y7)**2 - d_sq < 0
+  reinit:
+  - vx6 + e_b * prev(vx6) = 0
+  - vy6 + e_b * prev(vy6) = 0
+  - vx7 + e_b * prev(vx7) = 0
+  - vy7 + e_b * prev(vy7) = 0

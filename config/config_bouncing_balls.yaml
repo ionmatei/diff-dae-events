@@ -19,20 +19,21 @@ optimizer:
   blend_sharpness: 300
   prediction_method: sigmoid  # 'sigmoid', 'linear', or 'hermite'
   max_segments: 3
-  downsample_segments: true
-  all_segments: false  
-  max_points_per_segment: 200
-  sim_top_time: true
+  downsample_segments: true # takes every segment and interpolate it to max_points_per_segment
+  all_segments: false  # interpolates all segments if true, only the ones that have more than  max_points_per_segment if false
+  max_points_per_segment: 100 # maximum number of points per segment after downsampling
+  sim_top_time: true # if true adjust the end time based on the simulation end time, and not on the target time (limits the Zeno effect on the loss function)
   opt_params:
+    - g
     - e_g
     - e_b
-  max_iterations: 100
+  max_iterations: 400
   tol: 1.0e-8
   print_every: 1
-  max_blocks: 15
+  max_blocks: 22 # N segments + (N-1) events = 2N - 1 blocks
   max_targets: 1200 # 1.2 * ncp
   device: cpu
   gpu_memory_fraction: 0.9
-generate_animation: false
+generate_animation: true
 
 

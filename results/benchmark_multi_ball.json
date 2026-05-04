@@ -2,11 +2,11 @@
     "jax": {
         "method": "jax_multi",
         "ncp": 1000,
-        "avg_iter_time": 216.89368949290554,
+        "avg_iter_time": 216.8850803593591,
         "p_opt": {
-            "g": 9.81,
-            "e_g": 0.7969423092280292,
-            "e_b": 0.8993006846326977,
+            "g": 9.805092617310239,
+            "e_g": 0.7969264381917669,
+            "e_b": 0.8994340817225192,
             "d_sq": 0.1,
             "y_max": 3.0,
             "y_min": 0.0,
@@ -23,24 +23,26 @@
             "x_max": 3.0,
             "x_min": 0.0
         },
-        "final_validation_loss": 6.867966966642813e-06,
-        "iterations": 100,
+        "final_validation_loss": 6.045160233358537e-06,
+        "iterations": 300,
         "converged": false
     },
     "pytorch": {
         "method": "pytorch_multi",
         "ncp": 1000,
-        "avg_iter_time": 899.4078058184999,
+        "avg_iter_time": 878.2615653647229,
         "p_opt": {
-            "e_g": 0.8007261016099688,
-            "e_b": 0.8996386080844098
+            "g": 9.947846295126215,
+            "e_g": 0.799632588329264,
+            "e_b": 0.9068056849796943
         },
         "p_true": {
+            "g": 9.81,
             "e_g": 0.8,
             "e_b": 0.9
         },
-        "final_validation_loss": 5.404489394594493e-07,
-        "iterations": 100,
+        "final_validation_loss": 7.510771643132293e-05,
+        "iterations": 300,
         "converged": false
     }
 }

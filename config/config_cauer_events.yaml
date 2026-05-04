@@ -1,0 +1,65 @@
+dae_solver:
+  atol: 1.0e-6
+  rtol: 1.0e-6
+  start_time: 0.0
+  stop_time: 20.0
+  ncp: 500
+  dae_specification_file: dae_examples/dae_specification_smooth_events.json
+
+optimizer:
+  algorithm:
+    type: "ADAM"  # "SGD" or "ADAM"
+    params:
+      step_size: 0.01
+      # Adam-specific parameters (ignored for SGD):
+      beta1: 0.9
+      beta2: 0.999
+      epsilon: 1.0e-8
+  opt_params:
+    - C1_C
+    - C2_C
+    - C3_C
+    - C4_C
+    - C5_C
+    - L1_L
+    - L2_L
+  loss_type: mean
+  max_iterations: 500
+  tol: 1.0e-8
+  print_every: 1
+
+  # Event-aware diffrax integration knobs (consumed by
+  # `src/dae/dae_optimizer_events.py`).
+  diffrax_solver: Tsit5  # Tsit5 / Dopri5 / Dopri8 / Heun
+  # Static upper bound on # event-bounded segments per simulate. The
+  # IDA solver detects ~33 reinit events on the nominal Cauer-events
+  # spec at stop_time=60. Biased parameters during Adam (especially
+  # smaller C3_C / faster filter response) can push the count past 40,
+  # so we keep generous headroom. If this is too low, `simulate()`
+  # raises and the loss path produces NaN — the failure is loud, not
+  # silent. Cost scales linearly with this number, so don't go absurd.
+  max_segments: 15
+  newton_max_iter: 10  # chord iters per algebraic solve
+  diffrax_max_steps: 4096  # per-segment internal step budget
+  # AD-only sigmoid blending. Absent / null / <=0 means "disabled" (hard
+  # argmax in stage 3). Set to a positive value (e.g. 100-300) to widen
+  # the loss basin for the AD runner. Distinct from `blend_sharpness`
+  # below, which is DA-only.
+  ad_blend_sharpness: 150
+
+  # Discrete-adjoint padded-gradient knobs (consumed by
+  # `src/run/optimization_cauer_events_da.py` via `DAEPaddedGradient`).
+  # `max_blocks` follows the bouncing-balls convention of `2N - 1` for
+  # N segments. The IDA solver detects ~33 reinit events on the nominal
+  # Cauer-events spec at stop_time=60 (the threshold-crossing cycle
+  # repeats every ~1.8 s, much faster than the diffrax saved-point view
+  # suggested), so 34 segments → 67 blocks; 80 leaves margin for
+  # biased parameters that may fire a few more / fewer events.
+  max_blocks: 25 # N segments + (N-1) events = 2N - 1 blocks;
+  max_points_per_segment: 100  # ~1000 ncp / 34 segs ≈ 30 pts/seg + margin
+  max_targets: 600           # 1.2 * ncp
+  downsample_segments: true    # interpolate segments down to max_pts
+  blend_sharpness: 150      # sigmoid sharpness for segment blending
+
+  device: cpu
+  gpu_memory_fraction: 0.9

@@ -2,16 +2,16 @@ dae_solver:
   atol: 0.0001
   rtol: 0.0001
   start_time: 0.0
-  stop_time: 150.0
-  ncp: 5000
+  stop_time: 60.0
+  ncp: 1000
   dae_specification_file: dae_examples/dae_specification_smooth.json
   
 optimizer:
   discretization_method: bdf6  # backward_euler, trapezoidal, bdf2, bdf3, bdf4, bdf5, bdf6
   algorithm:
-    type: "SGD"  # "SGD" or "ADAM"
+    type: "ADAM"  # "SGD" or "ADAM"
     params:
-      step_size: 0.003
+      step_size: 0.01
       # Adam-specific parameters (ignored for SGD):
       beta1: 0.9
       beta2: 0.999
@@ -25,14 +25,9 @@ optimizer:
     - L1_L
     - L2_L
   loss_type: mean
-  max_iterations: 50
-  tol: 0.001
-  max_iterations_krylov: 30
-  tol_krylov: 0.0001
-  print_every: 10
+  max_iterations: 200
+  tol: 0.00000001
+  print_every: 1
   device: cpu
   gpu_memory_fraction: 0.9
-  sequential_fallback:
-    enable: False
-    threshold: 500
 
