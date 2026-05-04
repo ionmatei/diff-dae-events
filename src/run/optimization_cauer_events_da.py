@@ -51,6 +51,7 @@ sys.path.append(root_dir)
 
 from src.discrete_adjoint.dae_solver import DAESolver  # noqa: E402
 from src.discrete_adjoint.dae_padded_gradient import DAEPaddedGradient  # noqa: E402
+from src.run._cauer_events_ida_loss import evaluate_ida_mse  # noqa: E402
 
 
 # ---------------------------------------------------------------------- #
@@ -419,6 +420,25 @@ def main():
         print(f"  {n:12s}  {t_:12.6f}  {i_:12.6f}  {o_:12.6f}  "
               f"{ei:10.2%}  {eo:10.2%}")
 
+    # IDA-based MSE for apples-to-apples comparison with the AD runner.
+    rtol_ida = float(solver_cfg.get("rtol", 1e-6))
+    atol_ida = float(solver_cfg.get("atol", 1e-6))
+    print("\nIDA-based MSE evaluation (trusted forward solver):")
+    try:
+        ida_eval = evaluate_ida_mse(
+            dae_data, t_span, ncp,
+            p_nominal=p_nominal, p_init_full=p_init_full,
+            p_opt_full=p_opt_full, rtol=rtol_ida, atol=atol_ida,
+        )
+        print(f"  mse_init (IDA): {ida_eval['mse_init_ida']:.6e}")
+        print(f"  mse_opt  (IDA): {ida_eval['mse_opt_ida']:.6e}")
+    except Exception as exc:
+        print(f"  [warn] IDA-based evaluation failed: "
+              f"{type(exc).__name__}: {exc}")
+        ida_eval = {"mse_init_ida": None, "mse_opt_ida": None,
+                    "ncp_ida_eval": int(ncp),
+                    "rtol_ida_eval": rtol_ida, "atol_ida_eval": atol_ida}
+
     # --- 10. Persist + plot ---
     os.makedirs(args.results_dir, exist_ok=True)
     record = {
@@ -449,6 +469,7 @@ def main():
                      else None,
         "loss_last": float(last_loss_da) if np.isfinite(last_loss_da)
                      else None,
+        **ida_eval,
     }
     prefix = "optimization_cauer_events_da"
     record_path = os.path.join(args.results_dir, f"{prefix}.json")

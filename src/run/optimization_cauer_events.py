@@ -35,6 +35,7 @@ root_dir = os.path.dirname(os.path.dirname(current_dir))
 sys.path.append(root_dir)
 
 from src.dae.dae_optimizer_events import DAEOptimizerJaxADEvents  # noqa: E402
+from src.run._cauer_events_ida_loss import evaluate_ida_mse  # noqa: E402
 
 
 def load_config(config_path: str, spec_override: str = None):
@@ -595,6 +596,24 @@ def main():
         print(f"  {n:12s}  {t_:12.6f}  {i_:12.6f}  {o_:12.6f}  "
               f"{ei:10.2%}  {eo:10.2%}")
 
+    # IDA-based MSE for apples-to-apples comparison with the DA runner.
+    print("\nIDA-based MSE evaluation (trusted forward solver):")
+    try:
+        ida_eval = evaluate_ida_mse(
+            dae_data, (t_start, t_stop), ncp,
+            p_nominal=p_nominal, p_init_full=p_init_full,
+            p_opt_full=p_opt_full, rtol=rtol, atol=atol,
+        )
+        print(f"  mse_init (IDA): {ida_eval['mse_init_ida']:.6e}")
+        print(f"  mse_opt  (IDA): {ida_eval['mse_opt_ida']:.6e}")
+    except Exception as exc:
+        print(f"  [warn] IDA-based evaluation failed: "
+              f"{type(exc).__name__}: {exc}")
+        ida_eval = {"mse_init_ida": None, "mse_opt_ida": None,
+                    "ncp_ida_eval": int(ncp),
+                    "rtol_ida_eval": float(rtol),
+                    "atol_ida_eval": float(atol)}
+
     os.makedirs(args.results_dir, exist_ok=True)
     record = {
         "config_path": os.path.abspath(args.config),
@@ -628,6 +647,7 @@ def main():
                    if "p_last" in result else None),
         "loss_last": (float(result["loss_last"])
                       if "loss_last" in result else None),
+        **ida_eval,
     }
     prefix = f"optimization_cauer_events_{args.optimizer}"
     record_path = os.path.join(args.results_dir, f"{prefix}.json")

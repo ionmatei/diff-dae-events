@@ -1062,5 +1062,10 @@
   "best_every": 5,
   "best_iter": 500,
   "best_loss": 0.00012947455090294382,
-  "loss_last": 0.00012947455090294382
+  "loss_last": 0.00012947455090294382,
+  "mse_init_ida": 0.007587744943528917,
+  "mse_opt_ida": 0.00040098884381967095,
+  "ncp_ida_eval": 500,
+  "rtol_ida_eval": 1e-06,
+  "atol_ida_eval": 1e-06
 }
