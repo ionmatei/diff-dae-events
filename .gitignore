@@ -27,6 +27,9 @@ htmlcov/
 *.log
 logs/
 
+.claude/
+.gemini/
+
 
 .vscode/
 !.vscode/settings.json

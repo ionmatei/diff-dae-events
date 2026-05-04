@@ -1922,31 +1922,11 @@ class DAESolver:
 
         while t_curr < t_end:
             # ----------------------------------------------------------------
-            # CRITICAL: Control Step Size via Horizon
-            # ----------------------------------------------------------------
-            # If we just say solver.step(t_end), IDA takes huge steps.
-            # We urge it to return sooner by setting a closer horizon.
-            # solver.step(tout) integrates toward tout, but stops after one internal step.
-            # However, if that internal step is huge, we still miss points.
-            # BETTER: We don't force 'step(tout)' to be the end.
-            # But wait, 'step(tout)' usually means "take one step towards tout". 
-            # It DOES NOT mean "stop exactly at tout" unless we use 'run(tout)'.
-            # BUT, changing tout *guides* the heuristic max step size in some solvers.
-            
-            # Actually, to guarantee points at least every max_step, we should check:
-            # If the solver takes a huge step, we can't prevent it easily without options.
-            # scikits.odes doesn't easily expose 'max_step'.
-            
-            # ALTERNATIVE: Use solver.step(t_end) but checking the result.
-            # If result t_new is too far, that's bad.
-            
-            # Let's try passing 'max_step' to the constructor again but verified?
-            # No, 'max_step_size' was ignored.
-            
-            # Let's try controlling the upper bound of integration time passed to step.
-            # If we say step(t_curr + max_step), it CANNOT go past that.
-            # This effectively limits the step size returned.
-            
+            # Bound IDA's step size by passing a tighter horizon: solver.step
+            # cannot advance past `next_target`, so the returned step is at
+            # most `max_step`. scikits.odes doesn't expose a usable
+            # `max_step_size` constructor option, so this horizon trick is
+            # how we keep coarse output points.
             next_target = min(t_end, t_curr + max_step)
             
             # scikits.odes syntax for step: returns (flag, values, ...)
@@ -2022,30 +2002,18 @@ class DAESolver:
                         print(f"Warning: Zeno barrier detected (Event triggered immediately after previous event).")
                         print(f"  Terminating simulation at t={tau:.6f} to prevent infinite loop.")
                         
-                        # We must finalize the current segment and return
-                        # Add the event point to close the segment if not already added
-                        # (If len is 2, the second point might be tau, or close to it? 
-                        #  Actually cur_t was appeneded via cur_t.append(tau) further down?
-                        #  No, we are inside 'if flag == 2'. cur_t currently has partial steps?
-                        #  Let's check logic above: cur_t initialized at loop start.
-                        #  If flag=2, we haven't appended tau yet.)
-                        
-                        # Add the event point to close the segment ONLY if time advanced
+                        # Finalize the current segment with the event point
+                        # so the trajectory ends cleanly. Append only if time
+                        # advanced; otherwise just stamp the event time on
+                        # the last existing sample (don't overwrite states,
+                        # since x_new at tau would imply a jump).
                         if len(cur_t) == 0 or tau > cur_t[-1] + 1e-9:
                             cur_t.append(tau)
                             cur_x.append(x_new)
                             cur_z.append(z_new)
                             cur_xp.append(xp_new)
                         else:
-                            # If zero step, we can update the last point, but better to just keep the consistent one
-                            # Updating might introduce a jump. Let's strictly only append if advanced.
-                            # However, to capture the event time exactly:
                             cur_t[-1] = tau
-                            # Do NOT update states if it implies a jump. 
-                            # But x_new is the state at tau. 
-                            # If x_new differs from x_old, we have a problem.
-                            # For safety in Zeno, let's just terminate with what we have.
-                            pass
                         
                         # Add partial segment (ensure at least 1 point)
                         if len(cur_t) > 0:
@@ -2335,249 +2303,3 @@ def plot_solution(result: Dict, max_vars: int = 10):
     plt.show()
 
 
-if __name__ == "__main__":
-    import time as time_module
-
-    # Example usage
-    json_path = "dae_examples/dae_specification_smooth.json"
-    
-    with open(json_path, 'r') as f:
-        dae_data = json.load(f) 
-    
-
-    print("=" * 80)
-    print("DAE Solver using SUNDIALS IDA")
-    print("=" * 80)
-
-    # Load and solve DAE
-    start_time = time_module.time()
-
-    solver = DAESolver(dae_data)
-
-    result = solver.solve(
-        t_span=(0.0, 60.0),
-        ncp=500,  # Number of output points
-        rtol=1e-5,
-        atol=1e-5,
-    )
-
-    elapsed = time_module.time() - start_time
-
-    print(f"\nTotal solve time: {elapsed:.3f} seconds")
-    print(f"Final time: {result['t'][-1]:.6f}")
-    print(f"Number of time points: {len(result['t'])}")
-
-    # Print some solution values
-    print("\nSolution at final time:")
-    print(f"  First 5 differential states:")
-    for i in range(min(5, len(result['state_names']))):
-        print(f"    {result['state_names'][i]:20s} = {result['x'][i, -1]:12.6e}")
-
-    print(f"\n  First 5 algebraic variables:")
-    for i in range(min(5, len(result['alg_names']))):
-        print(f"    {result['alg_names'][i]:20s} = {result['z'][i, -1]:12.6e}")
-
-    if result['y'] is not None:
-        print(f"\n  Outputs:")
-        for i in range(len(result['output_names'])):
-            print(f"    {result['output_names'][i]:20s} = {result['y'][i, -1]:12.6e}")
-    else:
-        print(f"\n  No output equations (h) defined in DAE specification")
-
-    # Evaluate trapezoidal residual on IDA solution
-    print("\n" + "=" * 80)
-    print("Evaluating Trapezoidal Discretization Residual")
-    print("=" * 80)
-
-    trap_residual = solver.evaluate_trapezoidal_residual(result)
-
-    # Evaluate Hermite-Simpson residual on IDA solution
-    print("\n" + "=" * 80)
-    print("Evaluating Hermite-Simpson Discretization Residual")
-    print("=" * 80)
-
-    hs_residual = solver.evaluate_hermite_simpson_residual(result)
-
-    # Plot solution and residuals
-    print("\nGenerating plots...")
-    plot_solution(result, max_vars=5)
-
-    # Plot trapezoidal residuals
-    if len(trap_residual['residual_norms']) > 0:
-        print("Plotting trapezoidal residuals...")
-        try:
-            import matplotlib.pyplot as plt
-
-            fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-
-            # Plot residual norms
-            ax = axes[0]
-            ax.semilogy(trap_residual['t'], trap_residual['residual_norms'], 'b-', label='Total residual')
-            ax.semilogy(trap_residual['t'], trap_residual['residuals_diff_norms'], 'r--', label='Differential part')
-            ax.semilogy(trap_residual['t'], trap_residual['residuals_alg_norms'], 'g-.', label='Algebraic part')
-            ax.set_xlabel('Time')
-            ax.set_ylabel('Residual Norm')
-            ax.set_title('Trapezoidal Residual Norms (IDA Solution)')
-            ax.legend(loc='best')
-            ax.grid(True, alpha=0.3)
-
-            # Plot histogram of residuals
-            ax = axes[1]
-            ax.hist(trap_residual['residual_norms'], bins=50, edgecolor='black', alpha=0.7)
-            ax.set_xlabel('Residual Norm')
-            ax.set_ylabel('Frequency')
-            ax.set_title('Distribution of Trapezoidal Residuals')
-            ax.set_yscale('log')
-            ax.grid(True, alpha=0.3)
-
-            plt.tight_layout()
-            plt.show()
-
-        except ImportError:
-            print("Matplotlib not available, skipping residual plots")
-    else:
-        print("Skipping residual plots (no residual data available)")
-
-    # Plot Hermite-Simpson residuals
-    if len(hs_residual['residual_norms']) > 0:
-        print("Plotting Hermite-Simpson residuals...")
-        try:
-            import matplotlib.pyplot as plt
-
-            fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-
-            # Plot residual norms
-            ax = axes[0]
-            ax.semilogy(hs_residual['t'], hs_residual['residual_norms'], 'b-', label='Total residual')
-            ax.semilogy(hs_residual['t'], hs_residual['residuals_diff_norms'], 'r--', label='Differential part')
-            ax.semilogy(hs_residual['t'], hs_residual['residuals_alg_norms'], 'g-.', label='Algebraic part')
-            ax.set_xlabel('Time')
-            ax.set_ylabel('Residual Norm')
-            ax.set_title('Hermite-Simpson Residual Norms (IDA Solution)')
-            ax.legend(loc='best')
-            ax.grid(True, alpha=0.3)
-
-            # Plot histogram of residuals
-            ax = axes[1]
-            ax.hist(hs_residual['residual_norms'], bins=50, edgecolor='black', alpha=0.7)
-            ax.set_xlabel('Residual Norm')
-            ax.set_ylabel('Frequency')
-            ax.set_title('Distribution of Hermite-Simpson Residuals')
-            ax.set_yscale('log')
-            ax.grid(True, alpha=0.3)
-
-            plt.tight_layout()
-            plt.show()
-
-        except ImportError:
-            print("Matplotlib not available, skipping residual plots")
-    else:
-        print("Skipping Hermite-Simpson residual plots (no residual data available)")
-
-    # Comparison plot of both methods
-    if len(trap_residual['residual_norms']) > 0 and len(hs_residual['residual_norms']) > 0:
-        print("Plotting comparison of discretization schemes...")
-        try:
-            import matplotlib.pyplot as plt
-
-            fig, ax = plt.subplots(1, 1, figsize=(12, 6))
-
-            ax.semilogy(trap_residual['t'], trap_residual['residual_norms'], 'b-', label='Trapezoidal', linewidth=2)
-            ax.semilogy(hs_residual['t'], hs_residual['residual_norms'], 'r--', label='Hermite-Simpson', linewidth=2)
-            ax.set_xlabel('Time')
-            ax.set_ylabel('Residual Norm')
-            ax.set_title('Comparison: Trapezoidal vs Hermite-Simpson Residuals (IDA Solution)')
-            ax.legend(loc='best')
-            ax.grid(True, alpha=0.3)
-
-            plt.tight_layout()
-            plt.show()
-
-            # Print comparison statistics
-            print("\n" + "=" * 80)
-            print("Comparison of Discretization Schemes")
-            print("=" * 80)
-            print(f"Trapezoidal:")
-            print(f"  Max residual:  {trap_residual['max_residual']:.6e}")
-            print(f"  Mean residual: {trap_residual['mean_residual']:.6e}")
-            print(f"\nHermite-Simpson:")
-            print(f"  Max residual:  {hs_residual['max_residual']:.6e}")
-            print(f"  Mean residual: {hs_residual['mean_residual']:.6e}")
-            print(f"\nRatio (Hermite-Simpson / Trapezoidal):")
-            print(f"  Max residual:  {hs_residual['max_residual'] / trap_residual['max_residual']:.4f}")
-            print(f"  Mean residual: {hs_residual['mean_residual'] / trap_residual['mean_residual']:.4f}")
-            print("\nNote: Hermite-Simpson is a higher-order method (4th order) vs Trapezoidal (2nd order)")
-            print("      Lower residuals indicate better approximation of the DAE dynamics")
-
-        except ImportError:
-            print("Matplotlib not available, skipping comparison plots")
-
-    # Demonstrate vectorized evaluation with JAX
-    print("\n" + "=" * 80)
-    print("Testing Vectorized Function Evaluation (JAX vmap)")
-    print("=" * 80)
-
-    if JAX_AVAILABLE:
-        print("JAX is available - using vmap for parallel evaluation")
-    else:
-        print("JAX not available - using numpy loops")
-
-    # Prepare data for vectorized evaluation
-    t_vec = result['t']
-    x_vec = result['x']  # shape: (n_states, n_times)
-    z_vec = result['z']  # shape: (n_alg, n_times)
-    y_vec = np.vstack([x_vec, z_vec])  # shape: (n_states + n_alg, n_times)
-
-    print(f"\nEvaluating functions over {len(t_vec)} time points...")
-    print(f"  State vector shape: {x_vec.shape}")
-    print(f"  Algebraic vector shape: {z_vec.shape}")
-    print(f"  Combined y vector shape: {y_vec.shape}")
-
-    # Time the vectorized evaluations
-    import time as time_module
-
-    # Test f vectorized
-    start = time_module.time()
-    f_vec = solver.eval_f_vectorized(t_vec, y_vec)
-    f_time = time_module.time() - start
-    print(f"\nVectorized f evaluation:")
-    print(f"  Output shape: {f_vec.shape}")
-    print(f"  Time: {f_time:.6f} seconds")
-    print(f"  Sample values at t={t_vec[0]:.2f}: {f_vec[0, :min(3, f_vec.shape[1])]}")
-
-    # Test g vectorized
-    start = time_module.time()
-    g_vec = solver.eval_g_vectorized(t_vec, y_vec)
-    g_time = time_module.time() - start
-    print(f"\nVectorized g evaluation:")
-    print(f"  Output shape: {g_vec.shape}")
-    print(f"  Time: {g_time:.6f} seconds")
-    print(f"  Max constraint violation: {np.max(np.abs(g_vec)):.6e}")
-
-    # Test h vectorized (if available)
-    if solver.h_funcs:
-        start = time_module.time()
-        h_vec = solver.eval_h_vectorized(t_vec, y_vec)
-        h_time = time_module.time() - start
-        print(f"\nVectorized h evaluation:")
-        print(f"  Output shape: {h_vec.shape}")
-        print(f"  Time: {h_time:.6f} seconds")
-        print(f"  Sample output at t={t_vec[0]:.2f}: {h_vec[0, :min(3, h_vec.shape[1])]}")
-
-    # Compare with loop-based evaluation for verification
-    print(f"\nVerification: Comparing vectorized vs loop-based evaluation...")
-    f_loop = np.zeros((len(t_vec), len(solver.state_names)))
-    start = time_module.time()
-    for i in range(len(t_vec)):
-        x_i = x_vec[:, i]
-        z_i = z_vec[:, i]
-        f_loop[i] = solver.eval_f(t_vec[i], x_i, z_i)
-    loop_time = time_module.time() - start
-
-    print(f"  Loop-based f evaluation time: {loop_time:.6f} seconds")
-    print(f"  Vectorized speedup: {loop_time / f_time:.2f}x")
-    print(f"  Max difference: {np.max(np.abs(f_vec - f_loop)):.6e}")
-
-    print("\n" + "=" * 80)
-    print("Vectorized evaluation test complete!")
-    print("=" * 80)

@@ -1,10 +1,8 @@
 """
-PyTorch optimization for the N-ball bouncing-balls DAE.
-
-Generalization of `optimization_pytorch_bouncing_balls.py` (3 balls
-hard-coded) to an arbitrary N defined by the DAE specification. Uses
-`BouncingBallsNModel` for the differentiable forward simulation and
-`DAESolver` (compiled-residual fast path) to generate ground truth.
+PyTorch optimization for the N-ball bouncing-balls DAE (N set by the
+loaded spec). Uses `BouncingBallsNModel` for the differentiable forward
+simulation and `DAESolver` (compiled-residual fast path) to generate
+ground truth.
 """
 
 from __future__ import annotations

@@ -1,16 +1,11 @@
 """
-Adam optimization on the Cauer DAE WITH state-dependent events.
+Adam optimization on the Cauer DAE WITH state-dependent events,
+using the diffrax + composite-event + reinit path
+(`src/dae/dae_optimizer_events.py`).
 
-Uses `src/dae/dae_optimizer_events.py` (diffrax + composite event +
-reinit) — a generalization of the diffrax DAE path in
-`src/dae/dae_optimizer.py` to specs that include a `when` block.
-
-Pipeline mirrors `optimization_cauer.py`:
-  1. Load `config/config_cauer.yaml`, with the spec overridden to
-     `dae_examples/dae_specification_smooth_events.json` unless the user
-     points the config elsewhere.
-  2. Simulate at nominal parameters to build the ground-truth trajectory
-     (events fire at the true thresholds).
+Pipeline:
+  1. Load `config/config_cauer_events.yaml` (spec overridable via --spec).
+  2. Simulate at nominal parameters to build the ground-truth trajectory.
   3. Bias the parameters to optimize.
   4. Run Adam against the squared output error.
   5. Save loss / parameter / output plots and a JSON record.

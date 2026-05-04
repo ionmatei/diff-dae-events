@@ -7,7 +7,6 @@ dae_solver:
   dae_specification_file: dae_examples/dae_specification_bouncing_balls_N3.yaml
 
 optimizer:
-  discretization_method: bdf6  # backward_euler, trapezoidal, bdf2, bdf3, bdf4, bdf5, bdf6
   algorithm:
     type: "ADAM"  # "SGD" or "ADAM"
     params:
@@ -17,12 +16,9 @@ optimizer:
       beta2: 0.999
       epsilon: 1.0e-8
   blend_sharpness: 300
-  prediction_method: sigmoid  # 'sigmoid', 'linear', or 'hermite'
   max_segments: 5
-  downsample_segments: true # takes every segment and interpolate it to max_points_per_segment
-  all_segments: false  # interpolates all segments if true, only the ones that have more than  max_points_per_segment if false
-  max_points_per_segment: 25 # maximum number of points per segment after downsampling
-  sim_top_time: true # if true adjust the end time based on the simulation end time, and not on the target time (limits the Zeno effect on the loss function)
+  downsample_segments: true # downsample each segment to max_points_per_segment
+  max_points_per_segment: 25
   opt_params:
     - g
     - e_g
@@ -30,8 +26,6 @@ optimizer:
   max_iterations: 300
   tol: 1.0e-8
   print_every: 1
-  max_blocks: 15 # N segments + (N-1) events = 2N - 1 blocks; bumped for 25-ball model (more events)
-  max_targets: 600 # 1.2 * ncp
-  device: cpu
-  gpu_memory_fraction: 0.9
+  max_blocks: 15 # 2N - 1 with margin
+  max_targets: 600 # ~ 1.2 * ncp
 generate_animation: false

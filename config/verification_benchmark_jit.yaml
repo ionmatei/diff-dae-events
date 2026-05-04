@@ -1,6 +1,0 @@
-devices: ['gpu']
-ncp_values: [2000]
-methods: ['bdf6']
-n_runs: 1
-optimizer_config_path: 'config/config_cauer.yaml'
-output_dir: 'results/verification_jittiming'

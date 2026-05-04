@@ -3,9 +3,14 @@
   "config_path": "config/config_bouncing_balls_N3.yaml",
   "n_balls": 3,
   "ncp": 500,
+  "methods_run": [
+    "jax_ad",
+    "jax_da",
+    "pytorch_ad"
+  ],
   "jax_da": {
-    "total_time_s": 22.100266358989757,
-    "avg_iter_time_ms": 61.93559061738594,
+    "total_time_s": 22.622525848972145,
+    "avg_iter_time_ms": 63.927060606567046,
     "iterations": 300,
     "converged": false,
     "final_validation_loss": 9.375024887229906e-05,
@@ -338,8 +343,8 @@
     ]
   },
   "pytorch_ad": {
-    "total_time_s": 168.55952876701485,
-    "avg_iter_time_ms": 554.4074139866143,
+    "total_time_s": 163.43028604396386,
+    "avg_iter_time_ms": 536.8051632590916,
     "iterations": 300,
     "converged": false,
     "final_validation_loss": 3.8924887216320755e-09,
@@ -662,8 +667,8 @@
     ]
   },
   "jax_ad": {
-    "total_time_s": 33.35854599101003,
-    "avg_iter_time_ms": 73.8854195712754,
+    "total_time_s": 31.64055772096617,
+    "avg_iter_time_ms": 72.09087994742366,
     "iterations": 300,
     "converged": false,
     "final_validation_loss": 1.4031952498849843e-09,

@@ -1,11 +1,9 @@
 """
-Adam optimization on the N-ball bouncing-balls DAE.
-
-Generalization of `optimization_jax_bouncing_balls.py` (3 balls hard-coded)
-to an arbitrary N defined by the DAE specification. Generates ground truth
-with the IDA-based `DAESolver` (compiled-residual fast path), biases the
-optimized parameters, runs Adam via `DAEPaddedGradient`, and validates by
-re-simulating with the PyTorch `BouncingBallsNModel`.
+Adam optimization on the N-ball bouncing-balls DAE (N is set by the
+loaded spec). Generates ground truth with the IDA-based `DAESolver`
+(compiled-residual fast path), biases the optimized parameters, runs
+Adam via `DAEPaddedGradient`, and validates by re-simulating with the
+PyTorch `BouncingBallsNModel`.
 """
 
 import os

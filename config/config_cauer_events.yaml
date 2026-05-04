@@ -4,7 +4,7 @@ dae_solver:
   start_time: 0.0
   stop_time: 20.0
   ncp: 500
-  dae_specification_file: dae_examples/dae_specification_smooth_events.json
+  dae_specification_file: dae_examples/dae_specification_cauer_events.json
 
 optimizer:
   algorithm:
@@ -60,6 +60,3 @@ optimizer:
   max_targets: 600           # 1.2 * ncp
   downsample_segments: true    # interpolate segments down to max_pts
   blend_sharpness: 150      # sigmoid sharpness for segment blending
-
-  device: cpu
-  gpu_memory_fraction: 0.9

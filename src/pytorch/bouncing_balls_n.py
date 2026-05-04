@@ -1,11 +1,7 @@
 """
-PyTorch model for N bouncing balls in a 2D box.
-
-Generalization of `bouncing_balls.BouncingBallsModel` (which is hard-coded
-to 3 balls / 12 states / 15 events) to an arbitrary N. Event ordering and
-reinit semantics mirror the YAML/JSON spec produced by
-`src.run.modelica_balls_to_yaml` so that PyTorch and the IDA-based
-DAESolver simulate the *same* physics:
+PyTorch model for N bouncing balls in a 2D box (N is set by the loaded
+spec). Event ordering and reinit semantics match the YAML DAE spec so
+that PyTorch and the IDA-based DAESolver simulate the *same* physics:
 
     Per ball i (0-based), states are laid out as
         state[4i + 0] = x_i

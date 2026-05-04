@@ -919,32 +919,3 @@ class DAEOptimizerJaxAD:
 
         plt.tight_layout()
         plt.show()
-
-
-# Example usage
-if __name__ == "__main__":
-    print("DAEOptimizerJaxAD - Automatic Differentiation Optimizer")
-    print("=" * 60)
-
-    # Simple test DAE
-    dae_data = {
-        'states': [{'name': 'x', 'start': 1.0}],
-        'alg_vars': [{'name': 'z', 'start': 1.0}],
-        'parameters': [{'name': 'p', 'value': 0.5}],
-        'f': ['der(x) = -p * x'],
-        'g': ['0 = z - x * x'],
-        'h': ['x']
-    }
-
-    # Create optimizer
-    optimizer = DAEOptimizerJaxAD(dae_data)
-
-    # Test simulation
-    t_test = np.linspace(0, 2, 21)
-    result = optimizer.simulate(t_test)
-    print(f"\nSimulation result shapes:")
-    print(f"  x: {result['x'].shape}")
-    print(f"  z: {result['z'].shape}")
-    print(f"  y: {result['y'].shape}")
-
-    print("\nTest complete!")

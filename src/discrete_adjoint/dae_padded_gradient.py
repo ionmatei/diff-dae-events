@@ -28,7 +28,9 @@ class DAEPaddedGradient:
                 which subsumes the work of the other two — compiling all three
                 duplicates XLA effort. Pass () to skip warmup entirely (each
                 kernel will compile lazily on first call). Pass 'all' or
-                ('sweep', 'loss_grad', 'total_grad') for the legacy behavior.
+                ('sweep', 'loss_grad', 'total_grad') to compile all three
+                eagerly (slower startup, no benefit if only `optimize_adam`
+                is used).
         """
         self.dae_data = dae_data
         self.max_blocks = max_blocks
@@ -181,7 +183,7 @@ class DAEPaddedGradient:
         reinit_exprs = []        # flat list of all reinit expressions
         reinit_event_owner = []  # reinit_event_owner[k] = event index owning expression k
         reinit_state_target = [] # reinit_state_target[k] = state index for expression k
-        reinit_vars = []         # kept for legacy (flat list of (type, idx))
+        reinit_vars = []         # flat list of (type, idx); part of the funcs tuple but currently unused
 
         for ev_i, wc in enumerate(when_clauses):
             cond = wc['condition']
